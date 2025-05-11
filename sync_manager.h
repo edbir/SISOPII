@@ -10,24 +10,17 @@
 #include <vector>
 #include <condition_variable>
 #include <queue>
+#include <chrono>
 
 class SyncManager {
 public:
     SyncManager(NetworkManager& net, FileManager& fileMgr);
     ~SyncManager();
 
-    // Client-side functions
+    // Core sync functions
     bool startSync(const std::string& username);
     void stopSync();
     bool uploadFile(const std::string& username, const std::string& filepath);
-    bool downloadFile(const std::string& username, const std::string& filename);
-    bool deleteFile(const std::string& username, const std::string& filename);
-    bool listServerFiles(const std::string& username, std::vector<file_metadata>& files);
-    bool listClientFiles(const std::string& username, std::vector<file_metadata>& files);
-
-    // Server-side functions
-    void handleClientConnection(const std::string& username);
-    void broadcastFileChange(const std::string& username, const std::string& filename, bool isDelete);
 
 private:
     NetworkManager& network;
@@ -40,7 +33,6 @@ private:
     // Synchronization primitives
     std::mutex fileMutex;                    // Protects file operations
     std::mutex networkMutex;                 // Protects network operations
-    std::mutex sessionMutex;                 // Protects session management
     std::mutex uploadMutex;                  // Protects upload state
     std::condition_variable uploadCV;        // Signals upload completion
     std::condition_variable fileChangeCV;    // Signals file changes
@@ -53,10 +45,9 @@ private:
     };
     std::queue<FileOperation> fileOpQueue;
     std::mutex queueMutex;
-    
-    std::map<std::string, std::vector<int>> userSessions; // username -> vector of client sockets
 
     void syncLoop(const std::string& username);
     void handleFileChange(const std::string& username, const std::string& filepath, bool isDelete);
     void processFileOperation(const std::string& username, const FileOperation& op);
+    bool waitForAck();  // Helper method to wait for ACK packets
 }; 

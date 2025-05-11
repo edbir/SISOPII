@@ -1,17 +1,5 @@
-# Dropbox-like File Synchronization System
 
-A file synchronization system similar to Dropbox, implemented in C/C++ using TCP sockets.
 
-## Features
-
-- Multiple user support
-- Multiple simultaneous sessions per user (up to 2 devices)
-- Automatic file synchronization
-- File upload/download capabilities
-- Real-time file monitoring and synchronization
-- Command-line interface
-
-## Building the Project
 
 ```bash
 # Compile the server
@@ -36,11 +24,6 @@ g++ -o client client.cpp -pthread
 ## Available Commands
 
 - `upload <path/filename.ext>` - Upload a file to the server
-- `download <filename.ext>` - Download a file from the server
-- `delete <filename.ext>` - Delete a file from sync_dir
-- `list_server` - List files on the server
-- `list_client` - List files in sync_dir
-- `get_sync_dir` - Create sync_dir and start synchronization
 - `exit` - Close the session
 
 ## Project Structure

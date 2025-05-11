@@ -120,68 +120,6 @@ private:
                             std::cout << "[SERVER] Sent ACK for CMD_UPLOAD" << std::endl;
                             break;
                         }
-                        case CMD_DOWNLOAD: {
-                            std::cout << "[SERVER] Processing CMD_DOWNLOAD" << std::endl;
-                            // Receive filename
-                            if (!network.receivePacket(pkt)) {
-                                std::cerr << "[SERVER] Failed to receive filename" << std::endl;
-                                return;
-                            }
-                            std::string filename(pkt.payload, pkt.length);
-                            std::cout << "[SERVER] Received download request for: " << filename << std::endl;
-
-                            // Send file
-                            std::string filepath = fileManager.getUserDir(username) + "/" + filename;
-                            if (!network.sendFile(filepath)) {
-                                std::cerr << "[SERVER] Failed to send file" << std::endl;
-                                return;
-                            }
-                            std::cout << "[SERVER] File sent successfully" << std::endl;
-                            break;
-                        }
-                        case CMD_DELETE: {
-                            std::cout << "[SERVER] Processing CMD_DELETE" << std::endl;
-                            // Receive filename
-                            if (!network.receivePacket(pkt)) {
-                                std::cerr << "[SERVER] Failed to receive filename" << std::endl;
-                                return;
-                            }
-                            std::string filename(pkt.payload, pkt.length);
-                            std::cout << "[SERVER] Received delete request for: " << filename << std::endl;
-
-                            // Delete file
-                            if (!fileManager.deleteFile(username, filename)) {
-                                std::cerr << "[SERVER] Failed to delete file" << std::endl;
-                                return;
-                            }
-
-                            // Broadcast to other clients
-                            syncManager->broadcastFileChange(username, filename, true);
-                            break;
-                        }
-                        case CMD_LIST_SERVER: {
-                            std::cout << "[SERVER] Processing CMD_LIST_SERVER" << std::endl;
-                            // List files in user directory
-                            std::vector<file_metadata> files;
-                            if (!fileManager.listFiles(username, files)) {
-                                std::cerr << "[SERVER] Failed to list files" << std::endl;
-                                return;
-                            }
-
-                            // Send file list
-                            packet response;
-                            response.type = PACKET_TYPE_DATA;
-                            response.seqn = 0;
-                            response.total_size = 1;
-                            response.length = files.size() * sizeof(file_metadata);
-                            memcpy(response.payload, files.data(), response.length);
-                            if (!network.sendPacket(response)) {
-                                std::cerr << "[SERVER] Failed to send file list" << std::endl;
-                                return;
-                            }
-                            std::cout << "[SERVER] Sent file list (" << files.size() << " files)" << std::endl;
-                            break;
-                        }
                         case CMD_EXIT:
                             return;
                         default:
