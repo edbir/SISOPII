@@ -29,6 +29,7 @@ public:
     bool receiveFile(const std::string& filepath);
 
     int getClientSocket() const;
+    void setClientSocket(int socket);
 
 private:
     int serverSocket;

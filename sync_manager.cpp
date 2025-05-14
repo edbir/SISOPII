@@ -146,6 +146,7 @@ bool SyncManager::uploadFile(const std::string& username, const std::string& fil
 // Handles file change events from inotify
 // If a file is being uploaded, queues the operation
 // Otherwise, processes the change immediately
+
 void SyncManager::handleFileChange(const std::string& username, const std::string& filepath, bool isDelete) {
    
 
@@ -174,7 +175,7 @@ void SyncManager::processFileOperation(const std::string& username, const FileOp
 }
 
 // Main synchronization loop that monitors file system changes
-// Uses inotify to detect file modifications in real-time
+// Uses inotify to detect file modifications 
 void SyncManager::syncLoop(const std::string& username) {
     // Initialize inotify instance
     int inotifyFd = inotify_init();
@@ -185,7 +186,6 @@ void SyncManager::syncLoop(const std::string& username) {
 
     // Set up watch for the sync directory
     // IN_CLOSE_WRITE: Triggered when a file is closed after being opened for writing
-    // IN_DELETE: Triggered when a file is deleted
     // IN_MOVED_FROM: Triggered when a file is moved out of the watched directory
     // IN_MOVED_TO: Triggered when a file is moved into the watched directory
     int watchFd = inotify_add_watch(inotifyFd, syncDir.c_str(),

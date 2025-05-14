@@ -22,74 +22,99 @@ public:
     }
 
     void run() {
-        std::cout << "Server running on port " << port << std::endl;
+        std::cout << "[SERVER] Server running on port " << port << std::endl;
 
         while (true) {
             if (!network.acceptConnection()) {
-                std::cerr << "Error accepting connection" << std::endl;
+                std::cerr << "[SERVER] Error accepting connection" << std::endl;
                 continue;
             }
 
+            // Create a new NetworkManager for this client
+            NetworkManager* clientNetwork = new NetworkManager();
+            clientNetwork->setClientSocket(network.getClientSocket());
+            
             // Handle client connection in a new thread
-            std::thread clientThread(&Server::handleClient, this);
+            std::thread clientThread(&Server::handleClient, this, clientNetwork);
             clientThread.detach();
         }
     }
 
 private:
     int port;
-    NetworkManager network;
+    NetworkManager network;  // Main server network manager
     FileManager fileManager;
-    std::map<std::string, SyncManager*> userSyncManagers;
+    std::map<std::string, std::pair<SyncManager*, NetworkManager*>> userSyncManagers;
     std::mutex syncManagerMutex;
 
-    void handleClient() {
-        packet pkt;
-        if (!network.receivePacket(pkt)) {
-            std::cerr << "[SERVER] Failed to receive initial packet" << std::endl;
-            return;
+    void handleClient(NetworkManager* clientNetwork) {
+        std::string username;
+        try {
+            // Receive username
+            packet pkt;
+            if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_CMD) {
+                throw std::runtime_error("Failed to receive username");
+            }
+            username = std::string(pkt.payload, pkt.length);
+            std::cout << "[SERVER] New client connected: " << username << std::endl;
+
+            // Send ACK for username
+            pkt.type = PACKET_TYPE_ACK;
+            pkt.length = 0;
+            if (!clientNetwork->sendPacket(pkt)) {
+                throw std::runtime_error("Failed to send username ACK");
+            }
+
+            // Create user directory
+            if (!fileManager.createUserDir(username)) {
+                throw std::runtime_error("Failed to create user directory");
+            }
+
+            // Setup sync manager for user
+            {
+                std::lock_guard<std::mutex> lock(syncManagerMutex);
+                if (userSyncManagers.find(username) == userSyncManagers.end()) {
+                    userSyncManagers[username] = std::make_pair(
+                        new SyncManager(*clientNetwork, fileManager),
+                        clientNetwork
+                    );
+                } else {
+                    // Update existing user's network manager
+                    delete userSyncManagers[username].second;
+                    userSyncManagers[username].second = clientNetwork;
+                }
+            }
+
+            // Handle client commands
+            handleClientCommands(username, clientNetwork);
+
+        } catch (const std::exception& e) {
+            std::cerr << "[SERVER] Error handling client " << username << ": " << e.what() << std::endl;
         }
 
-        if (pkt.type != PACKET_TYPE_CMD) {
-            std::cerr << "[SERVER] Invalid initial packet type: " << pkt.type << std::endl;
-            return;
+        // Cleanup
+        {
+            std::lock_guard<std::mutex> lock(syncManagerMutex);
+            if (userSyncManagers.find(username) != userSyncManagers.end()) {
+                delete userSyncManagers[username].first;
+                delete userSyncManagers[username].second;
+                userSyncManagers.erase(username);
+            }
         }
+        std::cout << "[SERVER] Client " << username << " disconnected" << std::endl;
+    }
 
-        std::string username(pkt.payload, pkt.length);
-        std::cout << "[SERVER] New client connected: " << username << std::endl;
-
-        // Send ACK for username
-        pkt.type = PACKET_TYPE_ACK;
-        pkt.length = 0;
-        if (!network.sendPacket(pkt)) {
-            std::cerr << "[SERVER] Failed to send username ACK" << std::endl;
-            return;
-        }
-
-        // Create user directory if it doesn't exist
-        std::cout << "[SERVER] Creating user directory for: " << username << std::endl;
-        fileManager.createUserDir(username);
-
-        // Create sync manager for user if it doesn't exist
-        std::lock_guard<std::mutex> lock(syncManagerMutex);
-        if (userSyncManagers.find(username) == userSyncManagers.end()) {
-            userSyncManagers[username] = new SyncManager(network, fileManager);
-        }
-        SyncManager* syncManager = userSyncManagers[username];
-
-        // Handle client commands
+    void handleClientCommands(const std::string& username, NetworkManager* clientNetwork) {
         bool inUpload = false;
         std::string currentFilename;
         size_t expectedChunks = 0;
         size_t receivedChunks = 0;
+        packet pkt;
 
         while (true) {
-            if (!network.receivePacket(pkt)) {
-                std::cerr << "[SERVER] Failed to receive packet" << std::endl;
-                break;
+            if (!clientNetwork->receivePacket(pkt)) {
+                throw std::runtime_error("Failed to receive packet");
             }
-
-            std::cout << "[SERVER] Received packet type: " << pkt.type << std::endl;
 
             switch (pkt.type) {
                 case PACKET_TYPE_CMD: {
@@ -100,121 +125,93 @@ private:
 
                     uint16_t cmd;
                     memcpy(&cmd, pkt.payload, sizeof(cmd));
-                    std::cout << "[SERVER] Received command: " << cmd << std::endl;
 
-                    switch (cmd) {
-                        case CMD_UPLOAD: {
-                            std::cout << "[SERVER] Processing CMD_UPLOAD" << std::endl;
-                            inUpload = true;
-                            receivedChunks = 0;
-                            expectedChunks = 0;
-                            currentFilename.clear();
-                            
-                            // Send ACK for CMD_UPLOAD
-                            pkt.type = PACKET_TYPE_ACK;
-                            pkt.length = 0;
-                            if (!network.sendPacket(pkt)) {
-                                std::cerr << "[SERVER] Failed to send CMD_UPLOAD ACK" << std::endl;
-                                return;
-                            }
-                            std::cout << "[SERVER] Sent ACK for CMD_UPLOAD" << std::endl;
-                            break;
+                    if (cmd == CMD_UPLOAD) {
+                        inUpload = true;
+                        receivedChunks = 0;
+                        expectedChunks = 0;
+                        currentFilename.clear();
+                        
+                        // Send ACK for upload command
+                        pkt.type = PACKET_TYPE_ACK;
+                        pkt.length = 0;
+                        if (!clientNetwork->sendPacket(pkt)) {
+                            throw std::runtime_error("Failed to send upload ACK");
                         }
-                        case CMD_EXIT:
-                            return;
-                        default:
-                            std::cerr << "[SERVER] Unknown command: " << cmd << std::endl;
-                            return;
+                    } else if (cmd == CMD_EXIT) {
+                        return;
                     }
                     break;
                 }
                 case PACKET_TYPE_FILE: {
                     if (!inUpload) {
-                        std::cerr << "[SERVER] Received file packet without upload command" << std::endl;
-                        continue;
+                        throw std::runtime_error("Received file packet without upload command");
                     }
 
-                    // Only accept filename if currentFilename is empty
                     if (currentFilename.empty()) {
+                        // This is the filename packet
                         currentFilename = std::string(pkt.payload, pkt.length);
                         std::cout << "[SERVER] Received filename: " << currentFilename << std::endl;
+                        
                         // Send ACK for filename
                         pkt.type = PACKET_TYPE_ACK;
                         pkt.length = 0;
-                        if (!network.sendPacket(pkt)) {
-                            std::cerr << "[SERVER] Failed to send filename ACK" << std::endl;
-                            return;
+                        if (!clientNetwork->sendPacket(pkt)) {
+                            throw std::runtime_error("Failed to send filename ACK");
                         }
-                    }
-                    // Only accept file size if currentFilename is set and expectedChunks is 0
-                    else if (expectedChunks == 0) {
+                    } else if (expectedChunks == 0) {
+                        // This is the file size packet
                         size_t fileSize;
                         memcpy(&fileSize, pkt.payload, sizeof(fileSize));
-                        std::cout << "[SERVER] Received file size: " << fileSize << " bytes" << std::endl;
                         expectedChunks = (fileSize + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
+                        
+                        // Create/truncate file
+                        std::string filepath = fileManager.getUserDir(username) + "/" + currentFilename;
+                        std::ofstream file(filepath, std::ios::binary | std::ios::trunc);
+                        if (!file.is_open()) {
+                            throw std::runtime_error("Failed to create file: " + std::string(strerror(errno)));
+                        }
+                        file.close();
 
                         // Send ACK for file size
                         pkt.type = PACKET_TYPE_ACK;
                         pkt.length = 0;
-                        if (!network.sendPacket(pkt)) {
-                            std::cerr << "[SERVER] Failed to send file size ACK" << std::endl;
-                            return;
+                        if (!clientNetwork->sendPacket(pkt)) {
+                            throw std::runtime_error("Failed to send file size ACK");
                         }
-
-                        // Create/truncate file for new upload
-                        std::string filepath = fileManager.getUserDir(username) + "/" + currentFilename;
-                        std::cout << "[SERVER] Creating file: " << filepath << std::endl;
-                        std::ofstream file(filepath, std::ios::binary | std::ios::trunc);
-                        if (!file.is_open()) {
-                            std::cerr << "[SERVER] Failed to create file" << std::endl;
-                            return;
-                        }
-                        file.close();
                     }
                     break;
                 }
                 case PACKET_TYPE_DATA: {
                     if (!inUpload || currentFilename.empty() || expectedChunks == 0) {
-                        std::cerr << "[SERVER] Received data without upload in progress or missing filename/size" << std::endl;
-                        continue;
+                        throw std::runtime_error("Received data without upload in progress");
                     }
 
+                    // Write chunk to file
                     std::string filepath = fileManager.getUserDir(username) + "/" + currentFilename;
                     std::ofstream file(filepath, std::ios::binary | std::ios::app);
                     if (!file.is_open()) {
-                        std::cerr << "[SERVER] Failed to open file for writing" << std::endl;
-                        return;
+                        throw std::runtime_error("Failed to open file for writing: " + std::string(strerror(errno)));
                     }
 
                     file.write(pkt.payload, pkt.length);
-                    file.close();
-
-                    std::cout << "[SERVER] Received chunk " << (receivedChunks + 1) << " of " << expectedChunks 
-                              << " (size: " << pkt.length << " bytes)" << std::endl;
-                    
-                    // Log chunk content
-                    std::cout << "[SERVER] Chunk content (first 32 bytes): ";
-                    for (size_t i = 0; i < std::min(static_cast<size_t>(pkt.length), size_t(32)); i++) {
-                        printf("%02x ", (unsigned char)pkt.payload[i]);
+                    if (file.fail()) {
+                        throw std::runtime_error("Failed to write chunk: " + std::string(strerror(errno)));
                     }
-                    std::cout << std::endl;
-                    
-                    std::string content(pkt.payload, std::min(static_cast<size_t>(pkt.length), size_t(32)));
-                    std::cout << "[SERVER] Chunk content as string: " << content << std::endl;
+                    file.close();
 
                     receivedChunks++;
 
                     // Send ACK for chunk
                     pkt.type = PACKET_TYPE_ACK;
                     pkt.length = 0;
-                    if (!network.sendPacket(pkt)) {
-                        std::cerr << "[SERVER] Failed to send chunk ACK" << std::endl;
-                        return;
+                    if (!clientNetwork->sendPacket(pkt)) {
+                        throw std::runtime_error("Failed to send chunk ACK");
                     }
 
                     // Check if upload is complete
                     if (receivedChunks >= expectedChunks) {
-                        std::cout << "[SERVER] Upload completed for: " << currentFilename << std::endl;
+                        std::cout << "[SERVER] Upload completed for " << username << ": " << currentFilename << std::endl;
                         inUpload = false;
                         currentFilename.clear();
                         expectedChunks = 0;
@@ -223,13 +220,9 @@ private:
                     break;
                 }
                 default:
-                    std::cerr << "[SERVER] Unknown packet type: " << pkt.type << std::endl;
-                    break;
+                    throw std::runtime_error("Unknown packet type: " + std::to_string(pkt.type));
             }
         }
-
-        // Clean up
-        network.closeConnection();
     }
 };
 

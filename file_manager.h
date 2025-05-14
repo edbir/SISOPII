@@ -16,11 +16,11 @@ public:
     bool deleteFile(const std::string& username, const std::string& filename);
     bool listFiles(const std::string& username, std::vector<file_metadata>& files);
     bool getFileMetadata(const std::string& username, const std::string& filename, file_metadata& meta);
-    std::string getUserDir(const std::string& username) const;
+    std::string getUserDir(const std::string& username);
 
 private:
     std::string baseDirectory;
-    std::mutex fileMutex;
+    mutable std::mutex fileMutex;
 };
 
 #endif // FILE_MANAGER_H 
