@@ -138,6 +138,27 @@ private:
                         if (!clientNetwork->sendPacket(pkt)) {
                             throw std::runtime_error("Failed to send upload ACK");
                         }
+                    } else if (cmd == CMD_LIST_SERVER) {
+                        std::string userDir = fileManager.getUserDir(username);
+                        std::string fileList;
+                    
+                        for (const auto& entry : fs::directory_iterator(userDir)) {
+                            if (entry.is_regular_file()) {
+                                fileList += entry.path().filename().string() + "\n";
+                            }
+                        }
+                    
+                        // Enviar como pacote do tipo DATA
+                        packet resp;
+                        resp.type = PACKET_TYPE_DATA;
+                        resp.seqn = 0;
+                        resp.total_size = 1;
+                        resp.length = fileList.length();
+                        memcpy(resp.payload, fileList.c_str(), fileList.length());
+                    
+                        if (!clientNetwork->sendPacket(resp)) {
+                            throw std::runtime_error("Failed to send file list");
+                        }
                     } else if (cmd == CMD_EXIT) {
                         return;
                     }
