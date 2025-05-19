@@ -54,8 +54,6 @@ public:
                 handleUpload(command.substr(7), syncManager);
             } else if (command == "list_server") {
                 handleListServer();            
-            } else if (command == "list_client") {
-                handleListClient();
             } else if (command.substr(0, 6) == "delete") {
                 if (command.length() <= 7) {
                     std::cerr << "Usage: delete <filename>" << std::endl;
@@ -85,7 +83,6 @@ private:
         std::cout << "Available commands:" << std::endl;
         std::cout << "  upload <path/filename.ext> - Upload a file to the server" << std::endl;
         std::cout << "  list_server - List files stored on the server for your user" << std::endl;
-        std::cout << "  list_client - List local files stored on the client" << std::endl;
         std::cout << "  delete - Delete a file to the server" << std::endl;
         std::cout << "  exit - Close the session" << std::endl;
     }
@@ -120,13 +117,7 @@ private:
         std::string fileList(response.payload, response.payload + response.length);
         std::cout << "Files on server:" << std::endl;
         std::cout << fileList << std::endl;
-    }
-    
-    void handleListClient() {
-        std::string fileList = fileManager.listLocalFiles(username);
-        std::cout << "Files on local client:" << std::endl;
-        std::cout << fileList << std::endl;
-    }      
+    }     
 
     void handleExit(SyncManager& syncManager) {
         packet pkt;
