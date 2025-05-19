@@ -11,6 +11,7 @@ class Client {
 public:
     Client(const std::string& username, const std::string& serverIP, int port)
         : username(username), serverIP(serverIP), port(port), fileManager("client_data") {
+            
         if (!network.connectToServer(serverIP, port)) {
             throw std::runtime_error("Failed to connect to server");
         }
@@ -51,6 +52,19 @@ public:
                 printHelp();
             } else if (command.substr(0, 6) == "upload") {
                 handleUpload(command.substr(7), syncManager);
+            } else if (command == "list_server") {
+                handleListServer();            
+            } else if (command == "list_client") {
+                handleListClient();
+            } else if (command.substr(0, 6) == "delete") {
+                if (command.length() <= 7) {
+                    std::cerr << "Usage: delete <filename>" << std::endl;
+                    continue;
+                }
+                std::string filename = command.substr(7);
+                if (!syncManager.deleteFile(username, filename)) {
+                    std::cerr << "Error deleting file" << std::endl;
+                }
             } else if (command == "exit") {
                 handleExit(syncManager);
                 break;
@@ -70,6 +84,9 @@ private:
     void printHelp() {
         std::cout << "Available commands:" << std::endl;
         std::cout << "  upload <path/filename.ext> - Upload a file to the server" << std::endl;
+        std::cout << "  list_server - List files stored on the server for your user" << std::endl;
+        std::cout << "  list_client - List local files stored on the client" << std::endl;
+        std::cout << "  delete - Delete a file to the server" << std::endl;
         std::cout << "  exit - Close the session" << std::endl;
     }
 
@@ -78,6 +95,38 @@ private:
             std::cerr << "Error uploading file" << std::endl;
         }
     }
+
+    void handleListServer() {
+        packet pkt;
+        pkt.type = PACKET_TYPE_CMD;
+        pkt.seqn = 0;
+        pkt.total_size = 1;
+        uint16_t cmd = CMD_LIST_SERVER;
+        pkt.length = sizeof(cmd);
+        memcpy(pkt.payload, &cmd, sizeof(cmd));
+    
+        if (!network.sendPacket(pkt)) {
+            std::cerr << "Failed to send list_server command" << std::endl;
+            return;
+        }
+    
+        // Recebe a resposta do servidor com os nomes dos arquivos
+        packet response;
+        if (!network.receivePacket(response) || response.type != PACKET_TYPE_DATA) {
+            std::cerr << "Failed to receive file list from server" << std::endl;
+            return;
+        }
+    
+        std::string fileList(response.payload, response.payload + response.length);
+        std::cout << "Files on server:" << std::endl;
+        std::cout << fileList << std::endl;
+    }
+    
+    void handleListClient() {
+        std::string fileList = fileManager.listLocalFiles(username);
+        std::cout << "Files on local client:" << std::endl;
+        std::cout << fileList << std::endl;
+    }      
 
     void handleExit(SyncManager& syncManager) {
         packet pkt;

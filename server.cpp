@@ -138,6 +138,64 @@ private:
                         if (!clientNetwork->sendPacket(pkt)) {
                             throw std::runtime_error("Failed to send upload ACK");
                         }
+                    } 
+                    else if (cmd == CMD_LIST_SERVER) {
+                        std::string userDir = fileManager.getUserDir(username);
+                        std::string fileList;
+                    
+                        for (const auto& entry : fs::directory_iterator(userDir)) {
+                            if (entry.is_regular_file()) {
+                                fileList += entry.path().filename().string() + "\n";
+                            }
+                        }
+                    
+                        // Enviar como pacote do tipo DATA
+                        packet resp;
+                        resp.type = PACKET_TYPE_DATA;
+                        resp.seqn = 0;
+                        resp.total_size = 1;
+                        resp.length = fileList.length();
+                        memcpy(resp.payload, fileList.c_str(), fileList.length());
+                    
+                        if (!clientNetwork->sendPacket(resp)) {
+                            throw std::runtime_error("Failed to send file list");
+                        }
+                    } else if (cmd == CMD_DELETE) {
+                        std::cout << "[SERVER][DELETE] Received DELETE command" << std::endl;
+    
+                        // 1. Expect filename IMMEDIATELY (no intermediate ACK)
+                        std::cout << "[SERVER][NET] Expecting filename packet next...\n";
+                        if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_FILE) {
+                            std::cerr << "[SERVER][ERROR] Expected filename packet (got type=" 
+                                    << pkt.type << ")\n";
+                            //sendNack();
+                            break;
+                        }
+
+                        std::string filename(pkt.payload, pkt.length);
+                        std::string filepath = fileManager.getUserDir(username) + "/" + filename;
+                        std::cout << "[SERVER][DEBUG] Full deletion path: " << fs::absolute(filepath) << std::endl;
+
+                        // 2. Attempt deletion
+                        bool success = false;
+                        try {
+                            std::cout << "[SERVER][FS] Pre-deletion check: " << fs::exists(filepath) << std::endl;
+                            success = fs::remove(filepath);
+                            std::cout << "[SERVER][FS] Post-deletion check: " << fs::exists(filepath) << std::endl;
+                            std::cout << "[SERVER][DELETE] Deletion " << (success ? "succeeded" : "failed") 
+                                    << " for: " << filepath << std::endl;
+                        } catch (const fs::filesystem_error& e) {
+                            std::cerr << "[SERVER][ERROR] Filesystem exception: " << e.what() 
+                                    << " (code: " << e.code() << ")" << std::endl;
+                        }
+
+                        // 3. Send response
+                        pkt.type = success ? PACKET_TYPE_ACK : PACKET_TYPE_NACK;
+                        pkt.length = 0;
+                        std::cout << "[SERVER][NET] Sending " << (success ? "ACK" : "NACK") << std::endl;
+                        if (!clientNetwork->sendPacket(pkt)) {
+                            std::cerr << "[SERVER][ERROR] Failed to send response" << std::endl;
+                        }
                     } else if (cmd == CMD_EXIT) {
                         return;
                     }

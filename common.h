@@ -13,9 +13,12 @@
 #define PACKET_TYPE_ACK 2
 #define PACKET_TYPE_FILE 3
 #define PACKET_TYPE_DATA 4
+#define PACKET_TYPE_NACK 5
 
 // Commands
 #define CMD_UPLOAD 1
+#define CMD_LIST_SERVER 2  
+#define CMD_DELETE 3
 #define CMD_EXIT 5
 
 // Maximum payload size

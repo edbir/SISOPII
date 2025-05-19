@@ -21,6 +21,7 @@ public:
     bool startSync(const std::string& username);
     void stopSync();
     bool uploadFile(const std::string& username, const std::string& filepath);
+    bool deleteFile(const std::string& username, const std::string& filepath);
 
 private:
     NetworkManager& network;

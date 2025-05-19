@@ -292,3 +292,84 @@ bool SyncManager::waitForAck() {
     packet ack;
     return network.receivePacket(ack) && ack.type == PACKET_TYPE_ACK;
 } 
+
+
+bool SyncManager::deleteFile(const std::string& username, const std::string& filepath) {
+    std::cout << "[CLIENT][DELETE] Starting deletion for: " << filepath << std::endl;
+    std::cout << "[CLIENT][DEBUG] Thread ID: " << std::this_thread::get_id() << std::endl;
+    
+    // Wait for any ongoing operations
+    std::cout << "[CLIENT][SYNC] Checking for active operations..." << std::endl;
+    std::unique_lock<std::mutex> uploadLock(uploadMutex);
+    uploadCV.wait(uploadLock, [this]{ 
+        std::cout << "[CLIENT][SYNC] isUploading=" << isUploading << std::endl;
+        return !isUploading; 
+    });
+    isUploading = true;
+    uploadLock.unlock();
+    std::cout << "[CLIENT][SYNC] Operation lock acquired" << std::endl;
+
+    try {
+        std::string filename = fs::path(filepath).filename().string();
+        std::string syncPath = syncDir + "/" + filename;
+        std::cout << "[CLIENT][DEBUG] Full sync path: " << syncPath << std::endl;
+
+        // Verify local file
+        std::cout << "[CLIENT][FS] Checking local file existence..." << std::endl;
+        if (!fs::exists(syncPath)) {
+            std::cerr << "[CLIENT][ERROR] Local file not found in sync_dir" << std::endl;
+            throw std::runtime_error("Local file not found");
+        }
+
+        // Network protocol
+        std::cout << "[CLIENT][NET] Acquiring network lock..." << std::endl;
+        std::lock_guard<std::mutex> netLock(networkMutex);
+        
+        packet pkt;
+        
+        // Step 1: Send DELETE command
+        std::cout << "[CLIENT][NET] Sending DELETE command..." << std::endl;
+        pkt.type = PACKET_TYPE_CMD;
+        uint16_t cmd = CMD_DELETE;
+        pkt.length = sizeof(cmd);
+        memcpy(pkt.payload, &cmd, sizeof(cmd));
+        
+        if (!network.sendPacket(pkt)) {
+            std::cerr << "[CLIENT][ERROR] Failed to send command packet" << std::endl;
+            throw std::runtime_error("Network send failed");
+        }
+
+        // 2. Immediately send filename (NO ACK IN BETWEEN)
+        std::cout << "[CLIENT][NET] Immediately sending filename: " << filename << "\n";
+        pkt.type = PACKET_TYPE_FILE;
+        pkt.length = filename.length();
+        memcpy(pkt.payload, filename.c_str(), filename.length());
+        if (!network.sendPacket(pkt)) throw std::runtime_error("Filename send failed");
+
+        std::cout << "[CLIENT][NET] Waiting for command ACK..." << std::endl;
+        if (!waitForAck()) throw std::runtime_error("No ACK for command");
+
+        // Step 3: Delete local file
+        std::cout << "[CLIENT][FS] Attempting local deletion..." << std::endl;
+        if (!fs::remove(syncPath)) {
+            std::cerr << "[CLIENT][ERROR] fs::remove() failed (errno: " << errno << ")" << std::endl;
+            throw std::runtime_error("Local deletion failed");
+        }
+        std::cout << "[CLIENT][FS] Local deletion successful" << std::endl;
+
+        // Step 4: Wait for server confirmation
+        std::cout << "[CLIENT][NET] Waiting for final confirmation..." << std::endl;
+        if (!waitForAck()) throw std::runtime_error("Server confirmation failed");
+
+        isUploading = false;
+        uploadCV.notify_one();
+        std::cout << "[CLIENT][DELETE] Complete success for: " << syncPath << std::endl;
+        return true;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[CLIENT][ERROR] Exception: " << e.what() << std::endl;
+        isUploading = false;
+        uploadCV.notify_one();
+        return false;
+    }
+}
