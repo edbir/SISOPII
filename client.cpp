@@ -41,33 +41,45 @@ public:
 
         // Start sync manager
         SyncManager syncManager(network, fileManager);
-        syncManager.startSync(username);
+        if (!syncManager.startSync(username)) {
+            std::cerr << "Failed to start sync manager" << std::endl;
+            return;
+        }
 
         std::string command;
         while (true) {
-            std::cout << "> ";
-            std::getline(std::cin, command);
+            try {
+                std::cout << "> ";
+                std::getline(std::cin, command);
 
-            if (command == "help") {
-                printHelp();
-            } else if (command.substr(0, 6) == "upload") {
-                handleUpload(command.substr(7), syncManager);
-            } else if (command == "list_server") {
-                handleListServer();            
-            } else if (command.substr(0, 6) == "delete") {
-                if (command.length() <= 7) {
-                    std::cerr << "Usage: delete <filename>" << std::endl;
-                    continue;
+                if (command == "help") {
+                    printHelp();
+                } else if (command.substr(0, 6) == "upload") {
+                    if (command.length() <= 7) {
+                        std::cerr << "Usage: upload <path/filename.ext>" << std::endl;
+                        continue;
+                    }
+                    handleUpload(command.substr(7), syncManager);
+                } else if (command == "list_server") {
+                    handleListServer();            
+                } else if (command.substr(0, 6) == "delete") {
+                    if (command.length() <= 7) {
+                        std::cerr << "Usage: delete <filename>" << std::endl;
+                        continue;
+                    }
+                    std::string filename = command.substr(7);
+                    if (!syncManager.deleteFile(username, filename)) {
+                        std::cerr << "Error deleting file" << std::endl;
+                    }
+                } else if (command == "exit") {
+                    handleExit(syncManager);
+                    break;
+                } else {
+                    std::cout << "Unknown command. Type 'help' for available commands." << std::endl;
                 }
-                std::string filename = command.substr(7);
-                if (!syncManager.deleteFile(username, filename)) {
-                    std::cerr << "Error deleting file" << std::endl;
-                }
-            } else if (command == "exit") {
-                handleExit(syncManager);
-                break;
-            } else {
-                std::cout << "Unknown command. Type 'help' for available commands." << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << std::endl;
+                std::cerr << "Please try again." << std::endl;
             }
         }
     }
@@ -88,8 +100,13 @@ private:
     }
 
     void handleUpload(const std::string& filepath, SyncManager& syncManager) {
-        if (!syncManager.uploadFile(username, filepath)) {
-            std::cerr << "Error uploading file" << std::endl;
+        try {
+            if (!syncManager.uploadFile(username, filepath)) {
+                std::cerr << "Error uploading file. Please try again." << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error during upload: " << e.what() << std::endl;
+            std::cerr << "Please try again." << std::endl;
         }
     }
 

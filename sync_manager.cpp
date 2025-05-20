@@ -80,8 +80,13 @@ bool SyncManager::uploadFile(const std::string& username, const std::string& fil
         pkt.length = sizeof(cmd);
         memcpy(pkt.payload, &cmd, sizeof(cmd));
         
-        if (!network.sendPacket(pkt) || !waitForAck()) {
+        if (!network.sendPacket(pkt)) {
             throw std::runtime_error("Failed to send upload command");
+        }
+        
+        // Wait for ACK with timeout
+        if (!waitForAck()) {
+            throw std::runtime_error("No ACK received for upload command");
         }
 
         // Step 2: Send filename
@@ -89,8 +94,13 @@ bool SyncManager::uploadFile(const std::string& username, const std::string& fil
         pkt.length = filename.length();
         memcpy(pkt.payload, filename.c_str(), filename.length());
         
-        if (!network.sendPacket(pkt) || !waitForAck()) {
+        if (!network.sendPacket(pkt)) {
             throw std::runtime_error("Failed to send filename");
+        }
+        
+        // Wait for ACK with timeout
+        if (!waitForAck()) {
+            throw std::runtime_error("No ACK received for filename");
         }
 
         // Step 3: Read file and prepare for sending
@@ -109,8 +119,13 @@ bool SyncManager::uploadFile(const std::string& username, const std::string& fil
         pkt.length = sizeof(fileSize);
         memcpy(pkt.payload, &fileSize, sizeof(fileSize));
         
-        if (!network.sendPacket(pkt) || !waitForAck()) {
+        if (!network.sendPacket(pkt)) {
             throw std::runtime_error("Failed to send file size");
+        }
+        
+        // Wait for ACK with timeout
+        if (!waitForAck()) {
+            throw std::runtime_error("No ACK received for file size");
         }
 
         // Step 4: Send file content in chunks
@@ -125,8 +140,13 @@ bool SyncManager::uploadFile(const std::string& username, const std::string& fil
             pkt.length = chunkSize;
             memcpy(pkt.payload, buffer.data() + bytesSent, chunkSize);
             
-            if (!network.sendPacket(pkt) || !waitForAck()) {
+            if (!network.sendPacket(pkt)) {
                 throw std::runtime_error("Failed to send file chunk");
+            }
+            
+            // Wait for ACK with timeout
+            if (!waitForAck()) {
+                throw std::runtime_error("No ACK received for file chunk");
             }
             
             bytesSent += chunkSize;
@@ -144,23 +164,50 @@ bool SyncManager::uploadFile(const std::string& username, const std::string& fil
     }
 }
 
+// Helper method to wait for ACK packets with timeout
+bool SyncManager::waitForAck() {
+    packet ack;
+    struct timeval tv;
+    tv.tv_sec = 5;  // 5 second timeout
+    tv.tv_usec = 0;
+    
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(network.getSocket(), &readfds);
+    
+    if (select(network.getSocket() + 1, &readfds, NULL, NULL, &tv) <= 0) {
+        std::cerr << "[UPLOAD] Timeout waiting for ACK" << std::endl;
+        return false;
+    }
+    
+    return network.receivePacket(ack) && ack.type == PACKET_TYPE_ACK;
+}
+
 // Handles file change events from inotify
 // If a file is being uploaded, queues the operation
 // Otherwise, processes the change immediately
 
 void SyncManager::handleFileChange(const std::string& username, const std::string& filepath, bool isDelete) {
-   
+    std::cout << "[SYNC] File change detected: " << filepath << std::endl;
+    
+    // Get the original filepath (outside sync directory)
+    std::string originalFilepath = filepath;
+    if (filepath.find(syncDir) == 0) {
+        // This is a change in the sync directory, ignore it
+        std::cout << "[SYNC] Ignoring change in sync directory: " << filepath << std::endl;
+        return;
+    }
 
     if (isUploading) {
         // Queue the operation if an upload is in progress
-        FileOperation op{filepath, false, std::chrono::system_clock::now()};
+        FileOperation op{originalFilepath, false, std::chrono::system_clock::now()};
         std::lock_guard<std::mutex> lock(queueMutex);
         fileOpQueue.push(op);
         fileChangeCV.notify_one();
         return;
     }
 
-    uploadFile(username, filepath);
+    uploadFile(username, originalFilepath);
 }
 
 // Processes a queued file operation
@@ -186,23 +233,12 @@ void SyncManager::syncLoop(const std::string& username) {
     }
 
     // Set up watch for the sync directory
-    // IN_CLOSE_WRITE: Triggered when a file is closed after being opened for writing
-    // IN_MOVED_FROM: Triggered when a file is moved out of the watched directory
-    // IN_MOVED_TO: Triggered when a file is moved into the watched directory
     int watchFd = inotify_add_watch(inotifyFd, syncDir.c_str(),
                                   IN_CLOSE_WRITE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO);
     if (watchFd < 0) {
         std::cerr << "[SYNC] Error adding watch: " << strerror(errno) << std::endl;
         close(inotifyFd);
         return;
-    }
-
-    // Initialize last modified times for existing files
-    std::map<std::string, std::filesystem::file_time_type> lastModified;
-    for (const auto& entry : fs::directory_iterator(syncDir)) {
-        if (entry.is_regular_file()) {
-            lastModified[entry.path().string()] = fs::last_write_time(entry.path());
-        }
     }
 
     // Main monitoring loop
@@ -225,6 +261,16 @@ void SyncManager::syncLoop(const std::string& username) {
                         memcpy(&cmd, pkt.payload, sizeof(cmd));
                         
                         if (cmd == CMD_FILE_CHANGED) {
+                            std::cout << "[SYNC] Received file change notification" << std::endl;
+                            
+                            // Send ACK for command
+                            pkt.type = PACKET_TYPE_ACK;
+                            pkt.length = 0;
+                            if (!network.sendPacket(pkt)) {
+                                std::cerr << "[SYNC] Failed to send command ACK" << std::endl;
+                                continue;
+                            }
+                            
                             // Receive filename
                             if (!network.receivePacket(pkt) || pkt.type != PACKET_TYPE_FILE) {
                                 std::cerr << "[SYNC] Expected filename packet for file change" << std::endl;
@@ -233,6 +279,14 @@ void SyncManager::syncLoop(const std::string& username) {
                             std::string filename(pkt.payload, pkt.length);
                             std::cout << "[SYNC] Received file change notification for: " << filename << std::endl;
 
+                            // Send ACK for filename
+                            pkt.type = PACKET_TYPE_ACK;
+                            pkt.length = 0;
+                            if (!network.sendPacket(pkt)) {
+                                std::cerr << "[SYNC] Failed to send filename ACK" << std::endl;
+                                continue;
+                            }
+
                             // Receive file size
                             if (!network.receivePacket(pkt) || pkt.type != PACKET_TYPE_FILE) {
                                 std::cerr << "[SYNC] Expected file size packet for file change" << std::endl;
@@ -240,6 +294,14 @@ void SyncManager::syncLoop(const std::string& username) {
                             }
                             size_t fileSize;
                             memcpy(&fileSize, pkt.payload, sizeof(fileSize));
+
+                            // Send ACK for file size
+                            pkt.type = PACKET_TYPE_ACK;
+                            pkt.length = 0;
+                            if (!network.sendPacket(pkt)) {
+                                std::cerr << "[SYNC] Failed to send file size ACK" << std::endl;
+                                continue;
+                            }
 
                             // Create/truncate file
                             std::string filepath = syncDir + "/" + filename;
@@ -260,6 +322,14 @@ void SyncManager::syncLoop(const std::string& username) {
                                 file.write(pkt.payload, pkt.length);
                                 if (file.fail()) {
                                     std::cerr << "[SYNC] Failed to write chunk to file" << std::endl;
+                                    break;
+                                }
+
+                                // Send ACK for data chunk
+                                pkt.type = PACKET_TYPE_ACK;
+                                pkt.length = 0;
+                                if (!network.sendPacket(pkt)) {
+                                    std::cerr << "[SYNC] Failed to send data chunk ACK" << std::endl;
                                     break;
                                 }
 
@@ -314,47 +384,12 @@ void SyncManager::syncLoop(const std::string& username) {
                 lock.lock();
             }
         }
-
-        // Check for file modifications that might have been missed by inotify
-        for (const auto& entry : fs::directory_iterator(syncDir)) {
-            if (entry.is_regular_file()) {
-                std::string filepath = entry.path().string();
-                auto currentTime = fs::last_write_time(entry.path());
-                
-                // Handle new or modified files
-                if (lastModified.find(filepath) == lastModified.end()) {
-                    lastModified[filepath] = currentTime;
-                    handleFileChange(username, filepath, false);
-                }
-                else if (lastModified[filepath] != currentTime) {
-                    lastModified[filepath] = currentTime;
-                    handleFileChange(username, filepath, false);
-                }
-            }
-        }
-
-        // Clean up entries for deleted files
-        for (auto it = lastModified.begin(); it != lastModified.end();) {
-            if (!fs::exists(it->first)) {
-                handleFileChange(username, it->first, true);
-                it = lastModified.erase(it);
-            } else {
-                ++it;
-            }
-        }
     }
 
     // Cleanup inotify resources
     inotify_rm_watch(inotifyFd, watchFd);
     close(inotifyFd);
 }
-
-// Helper method to wait for and verify ACK packets
-bool SyncManager::waitForAck() {
-    packet ack;
-    return network.receivePacket(ack) && ack.type == PACKET_TYPE_ACK;
-} 
-
 
 bool SyncManager::deleteFile(const std::string& username, const std::string& filepath) {
     std::cout << "[CLIENT][DELETE] Starting deletion for: " << filepath << std::endl;
