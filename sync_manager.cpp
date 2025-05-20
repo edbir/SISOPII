@@ -27,6 +27,7 @@ bool SyncManager::startSync(const std::string& username) {
     if (running) return false;
 
     syncDir = "sync_dir_" + username;
+
     if (!fs::exists(syncDir)) {
         fs::create_directory(syncDir);
     }
@@ -207,37 +208,98 @@ void SyncManager::syncLoop(const std::string& username) {
     // Main monitoring loop
     char buffer[4096];
     while (running) {
-        // Set up select for non-blocking inotify read
+        // Set up select for non-blocking inotify read and network
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(inotifyFd, &readfds);
+        FD_SET(network.getSocket(), &readfds);
         
         struct timeval tv = {1, 0};  // 1 second timeout
-        if (select(inotifyFd + 1, &readfds, NULL, NULL, &tv) > 0) {
-            // Read inotify events
-            int length = read(inotifyFd, buffer, sizeof(buffer));
-            if (length < 0) break;
+        if (select(std::max(inotifyFd, network.getSocket()) + 1, &readfds, NULL, NULL, &tv) > 0) {
+            // Check for network messages first
+            if (FD_ISSET(network.getSocket(), &readfds)) {
+                packet pkt;
+                if (network.receivePacket(pkt)) {
+                    if (pkt.type == PACKET_TYPE_CMD) {
+                        uint16_t cmd;
+                        memcpy(&cmd, pkt.payload, sizeof(cmd));
+                        
+                        if (cmd == CMD_FILE_CHANGED) {
+                            // Receive filename
+                            if (!network.receivePacket(pkt) || pkt.type != PACKET_TYPE_FILE) {
+                                std::cerr << "[SYNC] Expected filename packet for file change" << std::endl;
+                                continue;
+                            }
+                            std::string filename(pkt.payload, pkt.length);
+                            std::cout << "[SYNC] Received file change notification for: " << filename << std::endl;
 
-            // Process each event
-            int i = 0;
-            while (i < length) {
-                struct inotify_event* event = (struct inotify_event*)&buffer[i];
-                if (event->len) {
-                    std::string filename(event->name);
-                    std::string filepath = syncDir + "/" + filename;
-                    
-                    // Handle different types of events
-                    if (event->mask & IN_CLOSE_WRITE) {
-                        // File was modified and closed
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                        handleFileChange(username, filepath, false);
-                    }
-                    else if (event->mask & (IN_DELETE | IN_MOVED_FROM)) {
-                        // File was deleted or moved out
-                        handleFileChange(username, filepath, true);
+                            // Receive file size
+                            if (!network.receivePacket(pkt) || pkt.type != PACKET_TYPE_FILE) {
+                                std::cerr << "[SYNC] Expected file size packet for file change" << std::endl;
+                                continue;
+                            }
+                            size_t fileSize;
+                            memcpy(&fileSize, pkt.payload, sizeof(fileSize));
+
+                            // Create/truncate file
+                            std::string filepath = syncDir + "/" + filename;
+                            std::ofstream file(filepath, std::ios::binary | std::ios::trunc);
+                            if (!file.is_open()) {
+                                std::cerr << "[SYNC] Failed to create file: " << filepath << std::endl;
+                                continue;
+                            }
+
+                            // Receive and write file contents
+                            size_t bytesReceived = 0;
+                            while (bytesReceived < fileSize) {
+                                if (!network.receivePacket(pkt) || pkt.type != PACKET_TYPE_DATA) {
+                                    std::cerr << "[SYNC] Expected data packet for file change" << std::endl;
+                                    break;
+                                }
+
+                                file.write(pkt.payload, pkt.length);
+                                if (file.fail()) {
+                                    std::cerr << "[SYNC] Failed to write chunk to file" << std::endl;
+                                    break;
+                                }
+
+                                bytesReceived += pkt.length;
+                            }
+
+                            file.close();
+                            std::cout << "[SYNC] Successfully updated file: " << filename << std::endl;
+                        }
                     }
                 }
-                i += sizeof(struct inotify_event) + event->len;
+            }
+
+            // Check for inotify events
+            if (FD_ISSET(inotifyFd, &readfds)) {
+                // Read inotify events
+                int length = read(inotifyFd, buffer, sizeof(buffer));
+                if (length < 0) break;
+
+                // Process each event
+                int i = 0;
+                while (i < length) {
+                    struct inotify_event* event = (struct inotify_event*)&buffer[i];
+                    if (event->len) {
+                        std::string filename(event->name);
+                        std::string filepath = syncDir + "/" + filename;
+                        
+                        // Handle different types of events
+                        if (event->mask & IN_CLOSE_WRITE) {
+                            // File was modified and closed
+                            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                            handleFileChange(username, filepath, false);
+                        }
+                        else if (event->mask & (IN_DELETE | IN_MOVED_FROM)) {
+                            // File was deleted or moved out
+                            handleFileChange(username, filepath, true);
+                        }
+                    }
+                    i += sizeof(struct inotify_event) + event->len;
+                }
             }
         }
 

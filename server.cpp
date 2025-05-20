@@ -10,14 +10,71 @@
 #include "sync_manager.h"
 #include <filesystem>
 #include <fstream>
+#include <atomic>
 
 namespace fs = std::filesystem;
+
+struct ClientConnection {
+    NetworkManager* network;
+    SyncManager* syncManager;
+    std::thread* clientThread;
+    std::atomic<bool> isActive{true};
+    std::string connectionId;
+
+    // Default constructor
+    ClientConnection() : network(nullptr), syncManager(nullptr), clientThread(nullptr) {}
+
+    // Move constructor
+    ClientConnection(ClientConnection&& other) noexcept
+        : network(other.network)
+        , syncManager(other.syncManager)
+        , clientThread(other.clientThread)
+        , isActive(other.isActive.load())
+        , connectionId(std::move(other.connectionId))
+    {
+        other.network = nullptr;
+        other.syncManager = nullptr;
+        other.clientThread = nullptr;
+    }
+
+    // Move assignment operator
+    ClientConnection& operator=(ClientConnection&& other) noexcept {
+        if (this != &other) {
+            network = other.network;
+            syncManager = other.syncManager;
+            clientThread = other.clientThread;
+            isActive = other.isActive.load();
+            connectionId = std::move(other.connectionId);
+
+            other.network = nullptr;
+            other.syncManager = nullptr;
+            other.clientThread = nullptr;
+        }
+        return *this;
+    }
+
+    // Delete copy operations
+    ClientConnection(const ClientConnection&) = delete;
+    ClientConnection& operator=(const ClientConnection&) = delete;
+};
 
 class Server {
 public:
     Server(int port) : port(port), fileManager("server_data") {
         if (!network.initServer(port)) {
             throw std::runtime_error("Failed to initialize server");
+        }
+    }
+
+    ~Server() {
+        // Limpar todas as conexões ativas
+        std::lock_guard<std::mutex> lock(connectionsMutex);
+        for (auto& [username, connections] : userConnections) {
+            for (auto& conn : connections) {
+                if (conn.syncManager) delete conn.syncManager;
+                if (conn.network) delete conn.network;
+                if (conn.clientThread) delete conn.clientThread;
+            }
         }
     }
 
@@ -32,7 +89,7 @@ public:
 
             // Create a new NetworkManager for this client
             NetworkManager* clientNetwork = new NetworkManager();
-            clientNetwork->setClientSocket(network.getClientSocket());
+            clientNetwork->setClientSocket(network.getSocket());
             
             // Handle client connection in a new thread
             std::thread clientThread(&Server::handleClient, this, clientNetwork);
@@ -44,8 +101,9 @@ private:
     int port;
     NetworkManager network;  // Main server network manager
     FileManager fileManager;
-    std::map<std::string, std::pair<SyncManager*, NetworkManager*>> userSyncManagers;
-    std::mutex syncManagerMutex;
+    std::map<std::string, std::vector<ClientConnection>> userConnections;
+    std::mutex connectionsMutex;
+    std::atomic<uint64_t> nextConnectionId{0};
 
     void handleClient(NetworkManager* clientNetwork) {
         std::string username;
@@ -72,16 +130,24 @@ private:
 
             // Setup sync manager for user
             {
-                std::lock_guard<std::mutex> lock(syncManagerMutex);
-                if (userSyncManagers.find(username) == userSyncManagers.end()) {
-                    userSyncManagers[username] = std::make_pair(
-                        new SyncManager(*clientNetwork, fileManager),
-                        clientNetwork
-                    );
+                std::lock_guard<std::mutex> lock(connectionsMutex);
+                if (userConnections.find(username) == userConnections.end()) {
+                    ClientConnection conn;
+                    conn.network = clientNetwork;
+                    conn.syncManager = new SyncManager(*clientNetwork, fileManager);
+                    conn.clientThread = nullptr;
+                    conn.isActive = true;
+                    conn.connectionId = std::to_string(nextConnectionId++);
+                    userConnections[username].push_back(std::move(conn));
                 } else {
                     // Update existing user's network manager
-                    delete userSyncManagers[username].second;
-                    userSyncManagers[username].second = clientNetwork;
+                    for (auto& conn : userConnections[username]) {
+                        if (conn.network == clientNetwork) {
+                            conn.network = clientNetwork;
+                            conn.isActive = true;
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -94,11 +160,12 @@ private:
 
         // Cleanup
         {
-            std::lock_guard<std::mutex> lock(syncManagerMutex);
-            if (userSyncManagers.find(username) != userSyncManagers.end()) {
-                delete userSyncManagers[username].first;
-                delete userSyncManagers[username].second;
-                userSyncManagers.erase(username);
+            std::lock_guard<std::mutex> lock(connectionsMutex);
+            for (auto& conn : userConnections[username]) {
+                if (conn.network == clientNetwork) {
+                    conn.isActive = false;
+                    break;
+                }
             }
         }
         std::cout << "[SERVER] Client " << username << " disconnected" << std::endl;
@@ -138,8 +205,7 @@ private:
                         if (!clientNetwork->sendPacket(pkt)) {
                             throw std::runtime_error("Failed to send upload ACK");
                         }
-                    } 
-                    else if (cmd == CMD_LIST_SERVER) {
+                    } else if (cmd == CMD_LIST_SERVER) {
                         std::string userDir = fileManager.getUserDir(username);
                         std::string fileList;
                     
@@ -149,7 +215,6 @@ private:
                             }
                         }
                     
-                        // Enviar como pacote do tipo DATA
                         packet resp;
                         resp.type = PACKET_TYPE_DATA;
                         resp.seqn = 0;
@@ -270,6 +335,10 @@ private:
                     // Check if upload is complete
                     if (receivedChunks >= expectedChunks) {
                         std::cout << "[SERVER] Upload completed for " << username << ": " << currentFilename << std::endl;
+                        
+                        // Broadcast the file change to all other clients
+                        broadcastFileChange(username, currentFilename, filepath);
+                        
                         inUpload = false;
                         currentFilename.clear();
                         expectedChunks = 0;
@@ -279,6 +348,81 @@ private:
                 }
                 default:
                     throw std::runtime_error("Unknown packet type: " + std::to_string(pkt.type));
+            }
+        }
+    }
+
+    void broadcastFileChange(const std::string& sourceUsername, const std::string& filename, const std::string& filepath) {
+        std::lock_guard<std::mutex> lock(connectionsMutex);
+        
+        // Send to all clients except the source
+        for (const auto& [username, connections] : userConnections) {
+            if (username != sourceUsername) {
+                for (const auto& conn : connections) {
+                    if (!conn.isActive) continue;
+                    
+                    std::cout << "[SERVER] Broadcasting file change to " << username << ": " << filename << std::endl;
+                    
+                    packet pkt;
+                    
+                    // Send command
+                    pkt.type = PACKET_TYPE_CMD;
+                    pkt.length = sizeof(uint16_t);
+                    uint16_t cmd = CMD_FILE_CHANGED;
+                    memcpy(pkt.payload, &cmd, sizeof(cmd));
+                    if (!conn.network->sendPacket(pkt)) {
+                        std::cerr << "[SERVER] Failed to send file change command to " << username << std::endl;
+                        continue;
+                    }
+                    
+                    // Send filename
+                    pkt.type = PACKET_TYPE_FILE;
+                    pkt.length = filename.length();
+                    memcpy(pkt.payload, filename.c_str(), filename.length());
+                    if (!conn.network->sendPacket(pkt)) {
+                        std::cerr << "[SERVER] Failed to send filename to " << username << std::endl;
+                        continue;
+                    }
+                    
+                    // Send file contents
+                    std::ifstream file(filepath, std::ios::binary);
+                    if (!file.is_open()) {
+                        std::cerr << "[SERVER] Failed to open file for broadcasting: " << filepath << std::endl;
+                        continue;
+                    }
+                    
+                    // Get file size
+                    file.seekg(0, std::ios::end);
+                    size_t fileSize = file.tellg();
+                    file.seekg(0, std::ios::beg);
+                    
+                    // Send file size
+                    pkt.type = PACKET_TYPE_FILE;
+                    pkt.length = sizeof(fileSize);
+                    memcpy(pkt.payload, &fileSize, sizeof(fileSize));
+                    if (!conn.network->sendPacket(pkt)) {
+                        std::cerr << "[SERVER] Failed to send file size to " << username << std::endl;
+                        continue;
+                    }
+                    
+                    // Send file contents in chunks
+                    std::vector<char> buffer(MAX_PAYLOAD_SIZE);
+                    while (file.good()) {
+                        file.read(buffer.data(), MAX_PAYLOAD_SIZE);
+                        pkt.type = PACKET_TYPE_DATA;
+                        pkt.length = file.gcount();
+                        
+                        if (pkt.length > 0) {
+                            memcpy(pkt.payload, buffer.data(), pkt.length);
+                            if (!conn.network->sendPacket(pkt)) {
+                                std::cerr << "[SERVER] Failed to send file chunk to " << username << std::endl;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    file.close();
+                }
             }
         }
     }

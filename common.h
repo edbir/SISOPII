@@ -17,8 +17,9 @@
 
 // Commands
 #define CMD_UPLOAD 1
-#define CMD_LIST_SERVER 2  
-#define CMD_DELETE 3
+#define CMD_LIST_SERVER 2
+#define CMD_FILE_CHANGED 3
+#define CMD_DELETE 4
 #define CMD_EXIT 5
 
 // Maximum payload size
