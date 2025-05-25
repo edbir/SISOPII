@@ -33,6 +33,8 @@ public:
         if (!network.receivePacket(ack) || ack.type != PACKET_TYPE_ACK) {
             throw std::runtime_error("Failed to receive server acknowledgment");
         }
+
+        fileManager.createUserDir(username);
     }
 
     void run() {
@@ -41,35 +43,47 @@ public:
 
         // Start sync manager
         SyncManager syncManager(network, fileManager);
-        syncManager.startSync(username);
+        if (!syncManager.startSync(username)) {
+            std::cerr << "Failed to start sync manager" << std::endl;
+            return;
+        }
 
         std::string command;
         while (true) {
-            std::cout << "> ";
-            std::getline(std::cin, command);
+            try {
+                std::cout << "> ";
+                std::getline(std::cin, command);
 
-            if (command == "help") {
-                printHelp();
-            } else if (command.substr(0, 6) == "upload") {
-                handleUpload(command.substr(7), syncManager);
-            } else if (command == "list_server") {
-                handleListServer();            
-            } else if (command == "list_client") {
-                handleListClient();
-            } else if (command.substr(0, 6) == "delete") {
-                if (command.length() <= 7) {
-                    std::cerr << "Usage: delete <filename>" << std::endl;
-                    continue;
+                if (command == "help") {
+                    printHelp();
+                } else if (command.substr(0, 6) == "upload") {
+                    if (command.length() <= 7) {
+                        std::cerr << "Usage: upload <path/filename.ext>" << std::endl;
+                        continue;
+                    }
+                    handleUpload(command.substr(7), syncManager);
+                } else if (command == "list_server") {
+                    handleListServer();            
+                } else if (command == "list_client") {
+                    handleListClient();
+                } else if (command.substr(0, 6) == "delete") {
+                    if (command.length() <= 7) {
+                        std::cerr << "Usage: delete <filename>" << std::endl;
+                        continue;
+                    }
+                    std::string filename = command.substr(7);
+                    if (!syncManager.deleteFile(username, filename)) {
+                        std::cerr << "Error deleting file" << std::endl;
+                    }
+                } else if (command == "exit") {
+                    handleExit(syncManager);
+                    break;
+                } else {
+                    std::cout << "Unknown command. Type 'help' for available commands." << std::endl;
                 }
-                std::string filename = command.substr(7);
-                if (!syncManager.deleteFile(username, filename)) {
-                    std::cerr << "Error deleting file" << std::endl;
-                }
-            } else if (command == "exit") {
-                handleExit(syncManager);
-                break;
-            } else {
-                std::cout << "Unknown command. Type 'help' for available commands." << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << std::endl;
+                std::cerr << "Please try again." << std::endl;
             }
         }
     }
@@ -85,14 +99,19 @@ private:
         std::cout << "Available commands:" << std::endl;
         std::cout << "  upload <path/filename.ext> - Upload a file to the server" << std::endl;
         std::cout << "  list_server - List files stored on the server for your user" << std::endl;
-        std::cout << "  list_client - List local files stored on the client" << std::endl;
+        std::cout << "  list_client - List files stored locally for your user" << std::endl;
         std::cout << "  delete - Delete a file to the server" << std::endl;
         std::cout << "  exit - Close the session" << std::endl;
     }
 
     void handleUpload(const std::string& filepath, SyncManager& syncManager) {
-        if (!syncManager.uploadFile(username, filepath)) {
-            std::cerr << "Error uploading file" << std::endl;
+        try {
+            if (!syncManager.uploadFile(username, filepath)) {
+                std::cerr << "Error uploading file. Please try again." << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Error during upload: " << e.what() << std::endl;
+            std::cerr << "Please try again." << std::endl;
         }
     }
 
@@ -120,13 +139,27 @@ private:
         std::string fileList(response.payload, response.payload + response.length);
         std::cout << "Files on server:" << std::endl;
         std::cout << fileList << std::endl;
-    }
+    }   
     
     void handleListClient() {
-        std::string fileList = fileManager.listLocalFiles(username);
-        std::cout << "Files on local client:" << std::endl;
-        std::cout << fileList << std::endl;
-    }      
+        std::vector<file_metadata> files;
+    
+        if (!fileManager.listFiles(username, files)) {
+            std::cerr << "Failed to list local files for user " << username << std::endl;
+            return;
+        }
+    
+        if (files.empty()) {
+            std::cout << "No local files found for user " << username << std::endl;
+            return;
+        }
+    
+        std::cout << "Local files for user " << username << ":" << std::endl;
+        for (const auto& file : files) {
+            std::cout << "  " << file.filename << " (" << file.size << " bytes)" << std::endl;
+        }
+    }
+    
 
     void handleExit(SyncManager& syncManager) {
         packet pkt;
