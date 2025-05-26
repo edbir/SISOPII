@@ -270,6 +270,58 @@ private:
                         if (!clientNetwork->sendPacket(pkt)) {
                             std::cerr << "[SERVER][ERROR] Failed to send response" << std::endl;
                         }
+                } else if (cmd == CMD_DOWNLOAD) {
+                        std::cout << "[SERVER] Received CMD_DOWNLOAD from " << username << std::endl;
+                        std::unique_lock<std::mutex> opLock(uploadMutex); // Serialize with upload operations
+                        
+                        // 1. Send ACK for CMD_DOWNLOAD
+                        packet ackPktS;
+                        ackPktS.type = PACKET_TYPE_ACK;
+                        ackPktS.length = 0;
+                        if (!clientNetwork->sendPacket(ackPktS)) {
+                            std::cerr << "[SERVER] Failed to send ACK for CMD_DOWNLOAD to " << username << std::endl;
+                            opLock.unlock(); // Release mutex before breaking
+                            break; 
+                        }
+                        
+                        // 2. Receive filename
+                        packet fileReqPkt;
+                        if (!clientNetwork->receivePacket(fileReqPkt) || fileReqPkt.type != PACKET_TYPE_FILE) {
+                            std::cerr << "[SERVER] Did not receive filename for download from " << username << std::endl;
+                            // Optionally send NACK here if client expects it for this specific failure
+                            opLock.unlock();
+                            break;
+                        }
+                        std::string requestedFilename(fileReqPkt.payload, fileReqPkt.length);
+                        std::cout << "[SERVER] " << username << " requests download for: " << requestedFilename << std::endl;
+                        
+                        std::string filepath_on_server = fileManager.getUserDir(username) + "/" + requestedFilename;
+                        
+                        // 3. Check file existence and send ACK/NACK
+                        if (fs::exists(filepath_on_server) && fs::is_regular_file(filepath_on_server)) {
+                            std::cout << "[SERVER] File " << requestedFilename << " exists. Sending ACK and file." << std::endl;
+                            ackPktS.type = PACKET_TYPE_ACK;
+                            ackPktS.length = 0;
+                            if (!clientNetwork->sendPacket(ackPktS)) {
+                                std::cerr << "[SERVER] Failed to send ACK for file existence to " << username << std::endl;
+                                opLock.unlock();
+                                break;
+                            }
+                        
+                            // 4. Send the file
+                            if (!clientNetwork->sendFile(filepath_on_server)) {
+                                std::cerr << "[SERVER] Failed to send file " << requestedFilename << " to " << username << std::endl;
+                            } else {
+                                std::cout << "[SERVER] File " << requestedFilename << " sent successfully to " << username << std::endl;
+                            }
+                        } else {
+                            std::cerr << "[SERVER] File " << requestedFilename << " not found for user " << username << ". Sending NACK." << std::endl;
+                            packet nackPkt;
+                            nackPkt.type = PACKET_TYPE_NACK;
+                            nackPkt.length = 0;
+                            clientNetwork->sendPacket(nackPkt); // Ignoring failure to send NACK for now
+                        }
+                        opLock.unlock(); // Release mutex
                 } else if (cmd == CMD_EXIT) {
                     return;
                 }

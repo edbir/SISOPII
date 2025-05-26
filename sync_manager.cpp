@@ -180,6 +180,10 @@ bool SyncManager::waitForAck() {
     return network.receivePacket(ack) && ack.type == PACKET_TYPE_ACK;
 }
 
+std::mutex& SyncManager::getNetworkMutex() {
+    return networkMutex;
+}
+
 // Handles file change events from inotify
 // If a file is being uploaded, queues the operation
 // Otherwise, processes the change immediately
@@ -244,6 +248,7 @@ void SyncManager::syncLoop(const std::string& username) {
         if (select(std::max(inotifyFd, network.getSocket()) + 1, &readfds, NULL, NULL, &tv) > 0) {
             // Check for network messages first
             if (FD_ISSET(network.getSocket(), &readfds)) {
+                std::lock_guard<std::mutex> lock(networkMutex);
                 packet pkt;
                 if (network.receivePacket(pkt)) {
                     if (pkt.type == PACKET_TYPE_CMD) {

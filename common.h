@@ -14,6 +14,7 @@
 #define PACKET_TYPE_FILE 3
 #define PACKET_TYPE_DATA 4
 #define PACKET_TYPE_NACK 5
+#define CMD_DOWNLOAD 6
 
 // Commands
 #define CMD_UPLOAD 1
