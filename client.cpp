@@ -216,7 +216,7 @@ private:
     
 void handleListClient() {
     std::vector<file_metadata> files;
-    std::string userDir = "client_data/sync_dir_" + username;
+    std::string userDir = "sync_dir_" + username;
 
     if (!fileManager.listFiles(userDir, files)) {
         std::cerr << "Failed to list local files for user " << username << std::endl;
