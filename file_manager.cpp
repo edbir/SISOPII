@@ -61,6 +61,51 @@ bool FileManager::listFiles(const std::string& username, std::vector<file_metada
 
     std::string userDir = baseDirectory + "/" + username;
 
+    std::cout << "oi " << userDir << std::endl;
+
+    DIR* dir = opendir(userDir.c_str());
+    if (!dir) {
+        std::cerr << "[FileManager] Failed to open directory: " << userDir << std::endl;
+        return false;
+    }
+
+    struct dirent* entry;
+    files.clear();
+
+    while ((entry = readdir(dir)) != nullptr) {
+        // Ignore "." and ".."
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        std::string filePath = userDir + "/" + entry->d_name;
+
+        struct stat st;
+        if (stat(filePath.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+            file_metadata meta;
+            meta.filename = entry->d_name;
+            meta.size = st.st_size;
+            meta.mtime = st.st_mtime;
+            meta.atime = st.st_atime;
+            meta.ctime = st.st_ctime;
+
+            files.push_back(meta);
+        }
+    }
+
+    closedir(dir);
+    std::cout << "[FileManager] Found " << files.size() << " file(s) for user: " << username << std::endl;
+    return true;
+}
+
+bool FileManager::listFilesClient(const std::string& username, std::vector<file_metadata>& files) {
+    std::cout << "[FileManager] Listing files for user: " << username << std::endl;
+
+    std::lock_guard<std::mutex> lock(fileMutex);
+
+    std::string userDir = "sync_dir_" + username;
+
+    std::cout << "oi " << userDir << std::endl;
+
     DIR* dir = opendir(userDir.c_str());
     if (!dir) {
         std::cerr << "[FileManager] Failed to open directory: " << userDir << std::endl;
