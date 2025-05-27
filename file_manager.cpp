@@ -61,8 +61,6 @@ bool FileManager::listFiles(const std::string& username, std::vector<file_metada
 
     std::string userDir = baseDirectory + "/" + username;
 
-    std::cout << "oi " << userDir << std::endl;
-
     DIR* dir = opendir(userDir.c_str());
     if (!dir) {
         std::cerr << "[FileManager] Failed to open directory: " << userDir << std::endl;
@@ -103,8 +101,6 @@ bool FileManager::listFilesClient(const std::string& username, std::vector<file_
     std::lock_guard<std::mutex> lock(fileMutex);
 
     std::string userDir = "sync_dir_" + username;
-
-    std::cout << "oi " << userDir << std::endl;
 
     DIR* dir = opendir(userDir.c_str());
     if (!dir) {
