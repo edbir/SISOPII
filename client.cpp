@@ -218,16 +218,29 @@ void handleListClient() {
     std::vector<file_metadata> files;
     std::string userDir = "sync_dir_" + username;
 
-    if (!fileManager.listFiles(userDir, files)) {
-        std::cerr << "Failed to list local files for user " << username << std::endl;
+    DIR* dir = opendir(userDir.c_str());
+    if (!dir) {
+        std::cerr << "Failed to open directory: " << userDir << std::endl;
         return;
     }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name != "." && name != "..") {
+            std::string fullPath = userDir + "/" + name;
+            file_metadata meta = get_file_metadata(fullPath);
+            files.push_back(meta);
+        }
+    }
+    closedir(dir);
 
     std::cout << "Local files:\n";
     for (const auto& file : files) {
         std::cout << " - " << file.filename << " (" << file.size << " bytes)\n";
     }
 }
+
 
     
 
