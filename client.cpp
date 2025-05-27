@@ -33,6 +33,8 @@ public:
         if (!network.receivePacket(ack) || ack.type != PACKET_TYPE_ACK) {
             throw std::runtime_error("Failed to receive server acknowledgment");
         }
+
+        fileManager.createUserDir(username);
     }
 
     void run() {
@@ -41,6 +43,7 @@ public:
 
         // Start sync manager
         //SyncManager syncManager(network, fileManager);
+
         if (!syncManager.startSync(username)) {
             std::cerr << "Failed to start sync manager" << std::endl;
             return;
@@ -59,7 +62,7 @@ public:
                         std::cerr << "Usage: upload <path/filename.ext>" << std::endl;
                         continue;
                     }
-                    //handleUpload(command.substr(7), syncManager);
+                 
                     handleUpload(command.substr(7));
                 } else if (command.substr(0, 8) == "download") {
                     if (command.length() <= 9) {
@@ -69,13 +72,18 @@ public:
                     handleDownload(command.substr(9));
                 } else if (command == "list_server") {
                     handleListServer();            
+                } else if (command == "list_server") {
+                    handleListServer();            
+                } else if (command == "list_client") {
+                    handleListClient();
+
                 } else if (command.substr(0, 6) == "delete") {
                     if (command.length() <= 7) {
                         std::cerr << "Usage: delete <filename>" << std::endl;
                         continue;
                     }
                     std::string filename = command.substr(7);
-                    //if (!syncManager.deleteFile(username, filename))
+                
                     if (!this->syncManager.deleteFile(username, filename)) {
                         std::cerr << "Error deleting file" << std::endl;
                     }
@@ -103,7 +111,9 @@ private:
         std::cout << "Available commands:" << std::endl;
         std::cout << "  upload <path/filename.ext> - Upload a file to the server" << std::endl;
         std::cout << "  list_server - List files stored on the server for your user" << std::endl;
+
         std::cout << "  download <filename> - Download a file from the server to current directory" << std::endl;
+        std::cout << "  list_client - List files stored locally for your user" << std::endl;
         std::cout << "  delete - Delete a file to the server" << std::endl;
         std::cout << "  exit - Close the session" << std::endl;
     }
@@ -202,6 +212,27 @@ private:
             // fs::remove(filename); // Optional: clean up partial file
         }
     }
+       
+    
+    void handleListClient() {
+        std::vector<file_metadata> files;
+    
+        if (!fileManager.listFiles(username, files)) {
+            std::cerr << "Failed to list local files for user " << username << std::endl;
+            return;
+        }
+    
+        if (files.empty()) {
+            std::cout << "No local files found for user " << username << std::endl;
+            return;
+        }
+    
+        std::cout << "Local files for user " << username << ":" << std::endl;
+        for (const auto& file : files) {
+            std::cout << "  " << file.filename << " (" << file.size << " bytes)" << std::endl;
+        }
+    }
+    
 
     void handleExit() {
         packet pkt;
