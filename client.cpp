@@ -214,24 +214,21 @@ private:
     }
        
     
-    void handleListClient() {
-        std::vector<file_metadata> files;
-    
-        if (!fileManager.listFiles(username, files)) {
-            std::cerr << "Failed to list local files for user " << username << std::endl;
-            return;
-        }
-    
-        if (files.empty()) {
-            std::cout << "No local files found for user " << username << std::endl;
-            return;
-        }
-    
-        std::cout << "Local files for user " << username << ":" << std::endl;
-        for (const auto& file : files) {
-            std::cout << "  " << file.filename << " (" << file.size << " bytes)" << std::endl;
-        }
+void handleListClient() {
+    std::vector<file_metadata> files;
+    std::string userDir = "client_data/sync_dir_" + username;
+
+    if (!fileManager.listFiles(userDir, files)) {
+        std::cerr << "Failed to list local files for user " << username << std::endl;
+        return;
     }
+
+    std::cout << "Local files:\n";
+    for (const auto& file : files) {
+        std::cout << " - " << file.filename << " (" << file.size << " bytes)\n";
+    }
+}
+
     
 
     void handleExit() {
