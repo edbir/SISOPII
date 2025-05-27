@@ -282,11 +282,10 @@ bool NetworkManager::receiveFile(const std::string& filepath) {
     return true;
 }
 
-int NetworkManager::getClientSocket() const {
+int NetworkManager::getSocket() const {
     return clientSocket;
 }
 
 void NetworkManager::setClientSocket(int socket) {
     clientSocket = socket;
-    isServer = false;  // Since we're setting a client socket, we're in client mode
 } 
