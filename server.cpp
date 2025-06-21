@@ -12,6 +12,7 @@
 #include "sync_manager.h"
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <atomic>
 
 namespace fs = std::filesystem;
@@ -126,21 +127,116 @@ public:
     {
         std::cout << "[SERVER] Server running on port " << port << std::endl;
 
-        while (true)
+        if (isPrimary)
         {
-            if (!network.acceptConnection())
+            // Lida com conexões de clientes normalmente
+            while (true)
             {
-                std::cerr << "[SERVER] Error accepting connection" << std::endl;
-                continue;
+                if (!network.acceptConnection())
+                {
+                    std::cerr << "[SERVER] Error accepting connection" << std::endl;
+                    continue;
+                }
+
+                NetworkManager *clientNetwork = new NetworkManager();
+                clientNetwork->setClientSocket(network.getSocket());
+                std::thread clientThread(&Server::handleClient, this, clientNetwork);
+                clientThread.detach();
             }
+        }
+        else
+        {
+            // Backup: escuta comandos do primário
+            while (true)
+            {
+                if (!network.acceptConnection())
+                {
+                    std::cerr << "[BACKUP] Erro ao aceitar conexão do primário.\n";
+                    continue;
+                }
 
-            // Create a new NetworkManager for this client
-            NetworkManager *clientNetwork = new NetworkManager();
-            clientNetwork->setClientSocket(network.getSocket());
-
-            // Handle client connection in a new thread
-            std::thread clientThread(&Server::handleClient, this, clientNetwork);
-            clientThread.detach();
+                int sock = network.getSocket();
+                std::thread backupThread([this, sock]()
+                                         {
+                    char buffer[1024];
+                    while (true) {
+                        ssize_t received = recv(sock, buffer, sizeof(buffer) - 1, 0);
+                        if (received <= 0) {
+                            std::cerr << "[BACKUP] Conexão com primário encerrada.\n";
+                            break;
+                        }
+    
+                        buffer[received] = '\0';
+                        std::string msg(buffer);
+                        std::cout << "[BACKUP] Comando recebido do primário: " << msg << std::endl;
+    
+                        // Exemplo de parsing básico: DELETE userX arquivo.txt
+                        std::istringstream iss(msg);
+                        std::string comando, usuario, arquivo;
+                        iss >> comando >> usuario >> arquivo;
+    
+                        bool sucesso = false;
+    
+                        if (comando == "DELETE") {
+                            std::string filepath = fileManager.getUserDir(usuario) + "/" + arquivo;
+                            try {
+                                sucesso = fs::remove(filepath);
+                                std::cout << "[BACKUP] Arquivo deletado: " << filepath << std::endl;
+                            } catch (...) { // Esses três pontos são para capturar qualquer exceção
+                                std::cerr << "[BACKUP] Falha ao deletar: " << filepath << std::endl;
+                            }
+                        }
+                        else if (comando == "UPLOAD") {
+                            std::string filepath = fileManager.getUserDir(usuario) + "/" + arquivo;
+                        
+                            try {
+                                fs::create_directories(fileManager.getUserDir(usuario));
+                        
+                                // Responde ACK_CMD para o primário
+                                std::string ack = "ACK_CMD";
+                                send(sock, ack.c_str(), ack.size(), 0);
+                        
+                                // Recebe o tamanho do arquivo
+                                size_t fileSize;
+                                ssize_t len = recv(sock, &fileSize, sizeof(fileSize), 0);
+                                if (len != sizeof(fileSize)) {
+                                    std::cerr << "[BACKUP] Falha ao receber tamanho do arquivo\n";
+                                    break;
+                                }
+                        
+                                std::ofstream file(filepath, std::ios::binary | std::ios::trunc);
+                                if (!file.is_open()) {
+                                    std::cerr << "[BACKUP] Falha ao criar arquivo: " << filepath << std::endl;
+                                    break;
+                                }
+                        
+                                size_t bytesReceived = 0;
+                                char buffer[1024];
+                                while (bytesReceived < fileSize) {
+                                    ssize_t received = recv(sock, buffer, std::min(sizeof(buffer), fileSize - bytesReceived), 0);
+                                    if (received <= 0) {
+                                        std::cerr << "[BACKUP] Falha ao receber chunk de arquivo\n";
+                                        break;
+                                    }
+                                    file.write(buffer, received);
+                                    bytesReceived += received;
+                                }
+                        
+                                file.close();
+                                sucesso = (bytesReceived == fileSize);
+                        
+                                std::cout << "[BACKUP] Arquivo recebido com sucesso: " << filepath << std::endl;
+                            } catch (...) {
+                                std::cerr << "[BACKUP] Erro ao tratar upload replicado\n";
+                            }
+                        }
+                         
+                        std::string resposta = sucesso ? "OK" : "NOK";
+                        send(sock, resposta.c_str(), resposta.size(), 0);
+                    }
+                    close(sock); });
+                backupThread.detach();
+            }
         }
     }
 
@@ -155,6 +251,59 @@ private:
     std::mutex uploadMutex;                                    // Mutex for upload synchronization
     std::vector<std::tuple<std::string, int>> backupAddresses; // (IP, porta)
     std::vector<int> backupSockets;                            // sockets abertos para cada backup
+
+    bool replicarParaBackups(const std::string& comando, const std::string& filepath) {
+        for (int sock : backupSockets) {
+            // Envia comando (UPLOAD username arquivo.txt)
+            if (send(sock, comando.c_str(), comando.size(), 0) < 0) {
+                std::cerr << "[REPLICAÇÃO] Falha ao enviar comando para backup\n";
+                return false;
+            }
+    
+            // Espera ACK do backup (para evitar sobreposição com conteúdo do comando)
+            char ackBuffer[16];
+            ssize_t ackLen = recv(sock, ackBuffer, sizeof(ackBuffer) - 1, 0);
+            if (ackLen <= 0 || std::string(ackBuffer, ackLen) != "ACK_CMD") {
+                std::cerr << "[REPLICAÇÃO] ACK_CMD não recebido\n";
+                return false;
+            }
+    
+            // Envia tamanho do arquivo
+            std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                std::cerr << "[REPLICAÇÃO] Falha ao abrir arquivo para leitura\n";
+                return false;
+            }
+    
+            size_t fileSize = file.tellg();
+            file.seekg(0);
+            send(sock, &fileSize, sizeof(fileSize), 0);
+    
+            // Envia conteúdo do arquivo em chunks
+            char buffer[1024];
+            size_t bytesSent = 0;
+            while (file && bytesSent < fileSize) {
+                file.read(buffer, sizeof(buffer));
+                std::streamsize bytes = file.gcount();
+                if (send(sock, buffer, bytes, 0) < 0) {
+                    std::cerr << "[REPLICAÇÃO] Falha ao enviar chunk de arquivo\n";
+                    return false;
+                }
+                bytesSent += bytes;
+            }
+            file.close();
+    
+            // Aguarda resposta final do backup
+            char resp[16];
+            ssize_t len = recv(sock, resp, sizeof(resp) - 1, 0);
+            if (len <= 0 || std::string(resp, len) != "OK") {
+                std::cerr << "[REPLICAÇÃO] Backup respondeu com erro\n";
+                return false;
+            }
+        }
+    
+        return true;
+    }    
 
     void handleClient(NetworkManager *clientNetwork)
     {
@@ -521,6 +670,23 @@ private:
                     std::cout << "[SERVER] Upload completed for " << username << ": " << currentFilename << std::endl;
 
                     std::string filepath = fileManager.getUserDir(username) + "/" + currentFilename;
+
+                    // Se primário, replicar
+                    if (isPrimary)
+                    {
+                        std::string comandoReplicacao = "UPLOAD " + username + " " + currentFilename;
+                        if (!replicarParaBackups(comandoReplicacao, filepath))
+                        {
+                            std::cerr << "[SERVER] Falha na replicação para os backups. Abortando resposta ao cliente.\n";
+                            // opcionalmente, envie NACK para cliente
+                            inUpload = false;
+                            currentFilename.clear();
+                            expectedChunks = 0;
+                            receivedChunks = 0;
+                            break;
+                        }
+                    }
+
                     uploadLock.unlock();
                     broadcastFileChange(username, currentFilename, filepath, clientNetwork->getSocket());
                     uploadLock.lock();
@@ -530,6 +696,7 @@ private:
                     expectedChunks = 0;
                     receivedChunks = 0;
                 }
+
                 break;
             }
             default:
@@ -652,32 +819,33 @@ private:
     }
 };
 
-int main(int argc, char *argv[])
-{
-    if (argc != 3)
-    {
-        std::cerr << "Uso: " << argv[0] << " <primary|backup> <porta>" << std::endl;
+int main(int argc, char* argv[]) {
+    if (argc < 3) {
+        std::cerr << "Uso: " << argv[0] << " <porta> <primary|backup>" << std::endl;
         return 1;
     }
 
-    std::string role = argv[1];
-    int port = std::stoi(argv[2]);
+    int port = std::stoi(argv[1]);
+    std::string role = argv[2];
+    bool isPrimary;
 
-    if (role == "primary")
-    {
-        std::cout << "[INFO] Iniciando como RM primário na porta " << port << "\n";
-        Server server(port, true); // true = primário
-        server.run();
-    }
-    else if (role == "backup")
-    {
-        std::cout << "[INFO] Iniciando como RM backup na porta " << port << "\n";
-        Server server(port, false); // false = backup
-        server.run();
-    }
-    else
-    {
-        std::cerr << "[ERRO] Função inválida. Use 'primary' ou 'backup'.\n";
+    if (role == "primary") {
+        isPrimary = true;
+    } else if (role == "backup") {
+        isPrimary = false;
+    } else {
+        std::cerr << "[ERRO] Função inválida. Use 'primary' ou 'backup'." << std::endl;
         return 1;
     }
+
+    try {
+        Server server(port, isPrimary);
+        server.run();
+    } catch (const std::exception& e) {
+        std::cerr << "[FATAL] " << e.what() << std::endl;
+        return 1;
+    }
+
+    return 0;
 }
+
