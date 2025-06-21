@@ -61,21 +61,33 @@ void NetworkManager::closeServer() {
 bool NetworkManager::connectToServer(const std::string& ip, int port) {
     clientSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (clientSocket < 0) {
-        std::cerr << "Error creating socket" << std::endl;
+        std::cerr << "[NETWORK] Socket creation failed (errno: " 
+                 << errno << ")\n";
         return false;
     }
+
+    // Set timeout (5 seconds)
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(clientSocket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(port);
 
     if (inet_pton(AF_INET, ip.c_str(), &serverAddr.sin_addr) <= 0) {
-        std::cerr << "Invalid address" << std::endl;
+        std::cerr << "[NETWORK] Invalid address " << ip 
+                 << " (errno: " << errno << ")\n";
+        close(clientSocket);
         return false;
     }
 
     if (connect(clientSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
-        std::cerr << "Connection failed" << std::endl;
+        std::cerr << "[NETWORK] Connection failed to " << ip << ":" << port
+                 << " (errno: " << errno << ": " << strerror(errno) << ")\n";
+        close(clientSocket);
         return false;
     }
 
@@ -282,11 +294,10 @@ bool NetworkManager::receiveFile(const std::string& filepath) {
     return true;
 }
 
-int NetworkManager::getClientSocket() const {
+int NetworkManager::getSocket() const {
     return clientSocket;
 }
 
 void NetworkManager::setClientSocket(int socket) {
     clientSocket = socket;
-    isServer = false;  // Since we're setting a client socket, we're in client mode
 } 

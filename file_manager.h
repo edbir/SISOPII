@@ -18,6 +18,7 @@ public:
     bool listFilesClient(const std::string& username, std::vector<file_metadata>& files);
     bool getFileMetadata(const std::string& username, const std::string& filename, file_metadata& meta);
     std::string getUserDir(const std::string& username);
+     std::string getBasePath() const { return baseDirectory; }
 
 private:
     std::string baseDirectory;

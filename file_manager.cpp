@@ -102,8 +102,6 @@ bool FileManager::listFilesClient(const std::string& username, std::vector<file_
 
     std::string userDir = "sync_dir_" + username;
 
-    std::cout << "oi " << userDir << std::endl;
-
     DIR* dir = opendir(userDir.c_str());
     if (!dir) {
         std::cerr << "[FileManager] Failed to open directory: " << userDir << std::endl;

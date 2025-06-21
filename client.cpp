@@ -9,11 +9,11 @@
 
 class Client {
 public:
-    Client(const std::string& username, const std::string& serverIP, int port)
-        : username(username), serverIP(serverIP), port(port), fileManager("client_data"), syncManager(network, fileManager) {
+    Client(const std::string& username, const std::string& fe_ip, int fe_port)
+        : username(username), serverIP(fe_ip), port(fe_port), fileManager("client_data"), syncManager(network, fileManager) {
             
         if (!network.connectToServer(serverIP, port)) {
-            throw std::runtime_error("Failed to connect to server");
+            throw std::runtime_error("Failed to connect to frontend server");
         }
 
         // Send username to server
@@ -248,16 +248,16 @@ private:
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " <username> <server_ip_address> <port>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <username> <frontend_ip_address> <frontend_port>" << std::endl;
         return 1;
     }
 
     try {
         std::string username = argv[1];
-        std::string serverIP = argv[2];
-        int port = std::stoi(argv[3]);
+        std::string fe_ip = argv[2];
+        int fe_port = std::stoi(argv[3]);
 
-        Client client(username, serverIP, port);
+        Client client(username, fe_ip, fe_port);
         client.run();
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
@@ -265,4 +265,4 @@ int main(int argc, char* argv[]) {
     }
 
     return 0;
-} 
+}

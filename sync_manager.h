@@ -22,6 +22,8 @@ public:
     void stopSync();
     bool uploadFile(const std::string& username, const std::string& filepath);
     bool deleteFile(const std::string& username, const std::string& filepath);
+    bool waitForAck();  // Helper method to wait for ACK packets
+    std::mutex& getNetworkMutex(); // Added getter
 
 private:
     NetworkManager& network;
@@ -50,5 +52,5 @@ private:
     void syncLoop(const std::string& username);
     void handleFileChange(const std::string& username, const std::string& filepath, bool isDelete);
     void processFileOperation(const std::string& username, const FileOperation& op);
-    bool waitForAck();  // Helper method to wait for ACK packets
+    
 }; 

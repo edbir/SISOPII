@@ -14,12 +14,15 @@
 #define PACKET_TYPE_FILE 3
 #define PACKET_TYPE_DATA 4
 #define PACKET_TYPE_NACK 5
+#define CMD_DOWNLOAD 6
 
 // Commands
 #define CMD_UPLOAD 1
-#define CMD_LIST_SERVER 2  
-#define CMD_DELETE 3
+#define CMD_LIST_SERVER 2
+#define CMD_FILE_CHANGED 3
+#define CMD_DELETE 4
 #define CMD_EXIT 5
+#define CMD_REPLICATE 7
 
 // Maximum payload size
 #define MAX_PAYLOAD_SIZE 1024
