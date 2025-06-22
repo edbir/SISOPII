@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <cstring>
+#include <chrono> // For heartbeat timing
 #include "network.h"
 #include "file_manager.h"
 #include "sync_manager.h"
@@ -14,6 +15,9 @@
 #include <algorithm>
 
 namespace fs = std::filesystem;
+
+// Add a new command for heartbeat
+#define CMD_HEARTBEAT 8
 
 struct ClientConnection {
     NetworkManager* network;
@@ -80,13 +84,21 @@ public:
             backupServers.end());
     }
 
+    std::vector<std::pair<std::string, int>> getBackupServers() {
+        std::lock_guard<std::mutex> lock(backupMutex);
+        return backupServers;
+    }
 };
 
 class Server {
 public:
     Server(int port, bool isLeader) 
     : port(port), fileManager(isLeader ? "leader_data" : "backup" + std::to_string(port)), 
-      isLeader(isLeader) {
+      isLeader(isLeader), running(true),
+      heartbeatInterval(std::chrono::seconds(3)), // Send heartbeat every 3 seconds
+      heartbeatTimeout(std::chrono::seconds(10)), // Leader fails if no heartbeat for 10 seconds
+      leaderActive(false) // Initially assume leader is not active for backups
+      {
     
     // Create server-specific root directory
     if (!fs::exists(fileManager.getBasePath())) {
@@ -96,14 +108,17 @@ public:
 
     // Leader-specific setup
     if (isLeader) {
-        backupServers = {
-            {"10.0.2.15", 8081},  // Backup 1
-            {"192.168.0.11", 8082}   // Backup 2
-        };
-        std::cout << "[LEADER] Ready with " << backupServers.size() << " backups\n";
+        // Initialize with default backup servers (can be registered dynamically too)
+        replicationManager.addBackupServer("127.0.0.1", 8081);  // Backup 1
+        replicationManager.addBackupServer("192.168.0.11", 8082); // Backup 2
+        std::cout << "[LEADER] Ready with " << replicationManager.getBackupServers().size() << " backups\n";
+        heartbeatThread = std::thread(&Server::sendHeartbeats, this);
     }
     else {
         std::cout << "[BACKUP] Ready at " << fileManager.getBasePath() << "\n";
+        leaderActive = false; // Backup starts assuming leader is not active until first heartbeat
+        // Backup servers will monitor the leader heartbeat
+        heartbeatThread = std::thread(&Server::monitorLeaderHeartbeat, this);
     }
 
     if (!network.initServer(port)) {
@@ -112,13 +127,25 @@ public:
 }
 
     ~Server() {
+        running = false;
+        if (heartbeatThread.joinable()) {
+            heartbeatThread.join();
+        }
         // Limpar todas as conexões ativas
         std::lock_guard<std::mutex> lock(connectionsMutex);
         for (auto& [username, connections] : userConnections) {
             for (auto& conn : connections) {
                 if (conn.syncManager) delete conn.syncManager;
-                if (conn.network) delete conn.network;
-                if (conn.clientThread) delete conn.clientThread;
+                if (conn.network) { // Ensure network is not null before deleting
+                    conn.network->closeConnection();
+                    delete conn.network;
+                }
+                if (conn.clientThread) {
+                    if (conn.clientThread->joinable()) {
+                        conn.clientThread->join(); // Join detached threads if possible, or detach them properly
+                    }
+                    delete conn.clientThread;
+                }
             }
         }
     }
@@ -134,9 +161,11 @@ public:
     void run() {
         std::cout << "[SERVER] Server running on port " << port << std::endl;
 
-        while (true) {
+        while (running) {
             if (!network.acceptConnection()) {
                 std::cerr << "[SERVER] Error accepting connection" << std::endl;
+                // Small sleep here to prevent busy-waiting on accept failure
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
 
@@ -160,72 +189,187 @@ private:
     std::mutex uploadMutex;  // Mutex for upload synchronization
     ReplicationManager replicationManager;
     bool isLeader;
-    std::vector<std::pair<std::string, int>> backupServers; // Stores IP and port of backups
+
+    std::atomic<bool> running; // To control main server loop and heartbeat thread
+    std::thread heartbeatThread; // For sending/monitoring heartbeats
+    std::chrono::seconds heartbeatInterval; // How often leader sends heartbeats
+    std::chrono::seconds heartbeatTimeout;  // How long backup waits for heartbeat
+    std::chrono::steady_clock::time_point lastHeartbeatTime; // Last time backup received heartbeat
+    std::mutex heartbeatMutex; // Protects lastHeartbeatTime
+    std::atomic<bool> leaderActive; // State of the leader from backup's perspective
+
+    // Leader: Sends heartbeats to backups
+    void sendHeartbeats() {
+        while (running) {
+            auto backups = replicationManager.getBackupServers();
+            for (const auto& [ip, port] : backups) {
+                NetworkManager nm;
+                if (nm.connectToServer(ip, port)) {
+                    packet pkt;
+                    pkt.type = PACKET_TYPE_CMD;
+                    uint16_t cmd = CMD_HEARTBEAT;
+                    pkt.length = sizeof(cmd);
+                    memcpy(pkt.payload, &cmd, sizeof(cmd));
+                    if (nm.sendPacket(pkt)) {
+                        // std::cout << "[LEADER] Sent heartbeat to " << ip << ":" << port << std::endl; // Too chatty
+                    } else {
+                        std::cerr << "[LEADER] Failed to send heartbeat to " << ip << ":" << port << std::endl;
+                    }
+                    nm.closeConnection(); // Close connection after sending heartbeat
+                } else {
+                    std::cerr << "[LEADER] Could not connect to backup " << ip << ":" << port << " for heartbeat." << std::endl;
+                }
+            }
+            std::this_thread::sleep_for(heartbeatInterval);
+        }
+    }
+
+    // Backup: Monitors heartbeats from leader
+    void monitorLeaderHeartbeat() {
+        // For a backup, it will listen on its own server socket for connections from the leader
+        // and handle them via handleReplicationCommand.
+        // This separate thread is to actively check if the lastHeartbeatTime has exceeded the timeout.
+        while (running) {
+            std::this_thread::sleep_for(std::chrono::seconds(1)); // Check every second
+
+            std::lock_guard<std::mutex> lock(heartbeatMutex);
+            if (std::chrono::steady_clock::now() - lastHeartbeatTime > heartbeatTimeout) {
+                if (leaderActive) {
+                    std::cerr << "[BACKUP] LEADER FAILED! No heartbeat received for " 
+                              << heartbeatTimeout.count() << " seconds." << std::endl;
+                    leaderActive = false;
+                    // Here, you would typically trigger leader election
+                }
+            } else {
+                if (!leaderActive) {
+                    std::cout << "[BACKUP] Leader is active." << std::endl;
+                    leaderActive = true;
+                }
+            }
+        }
+    }
 
     void handleClient(NetworkManager* clientNetwork) {
-        std::string username;
+        std::string username; // Will remain empty for backup-side connections
         try {
-            // Receive username
-            packet pkt;
-            if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_CMD) {
-                throw std::runtime_error("Failed to receive username");
-            }
-            username = std::string(pkt.payload, pkt.length);
-            std::cout << "[SERVER] New client connected: " << username << std::endl;
+            if (isLeader) {
+                // Leader logic: handle regular client connections
+                packet pkt;
+                if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_CMD) {
+                    std::cerr << "[SERVER] Initial packet was not a CMD or failed to receive on leader. Closing connection." << std::endl;
+                    clientNetwork->closeConnection();
+                    delete clientNetwork;
+                    return;
+                }
+                username = std::string(pkt.payload, pkt.length);
+                std::cout << "[SERVER] New client connected: " << username << std::endl;
 
-            // Send ACK for username
-            pkt.type = PACKET_TYPE_ACK;
-            pkt.length = 0;
-            if (!clientNetwork->sendPacket(pkt)) {
-                throw std::runtime_error("Failed to send username ACK");
-            }
+                pkt.type = PACKET_TYPE_ACK;
+                pkt.length = 0;
+                if (!clientNetwork->sendPacket(pkt)) {
+                    std::cerr << "[SERVER] Failed to send username ACK. Closing connection." << std::endl;
+                    clientNetwork->closeConnection();
+                    delete clientNetwork;
+                    return;
+                }
 
-            // Create user directory
-            if (!fileManager.createUserDir(username)) {
-                throw std::runtime_error("Failed to create user directory");
-            }
+                if (!fileManager.createUserDir(username)) {
+                    std::cerr << "[SERVER] Failed to create user directory. Closing connection." << std::endl;
+                    clientNetwork->closeConnection();
+                    delete clientNetwork;
+                    return;
+                }
 
-            // Setup sync manager for user
-            {
-                std::lock_guard<std::mutex> lock(connectionsMutex);
-                if (userConnections.find(username) == userConnections.end()) {
+                { // Scope for lock_guard
+                    std::lock_guard<std::mutex> lock(connectionsMutex);
                     ClientConnection conn;
                     conn.network = clientNetwork;
-                    conn.syncManager = new SyncManager(*clientNetwork, fileManager);
-                    conn.clientThread = nullptr;
-                    conn.isActive = true;
-                    conn.connectionId = std::to_string(nextConnectionId++);
-                    userConnections[username].push_back(std::move(conn));
-                } else {
-                    // Add new connection for existing user
-                    ClientConnection conn;
-                    conn.network = clientNetwork;
-                    conn.syncManager = new SyncManager(*clientNetwork, fileManager);
-                    conn.clientThread = nullptr;
+                    conn.syncManager = new SyncManager(*clientNetwork, fileManager); // Assuming FileManager is available here
+                    conn.clientThread = nullptr; // This thread itself
                     conn.isActive = true;
                     conn.connectionId = std::to_string(nextConnectionId++);
                     userConnections[username].push_back(std::move(conn));
                 }
-            }
 
-            // Handle client commands
-            handleClientCommands(username, clientNetwork);
+                // Handle regular client commands for the leader
+                handleClientCommands(username, clientNetwork);
+
+                // Cleanup for regular client connection
+                std::lock_guard<std::mutex> lock(connectionsMutex);
+                for (auto it = userConnections[username].begin(); it != userConnections[username].end(); ++it) {
+                    if (it->network == clientNetwork) {
+                        it->isActive = false;
+                        // For now, just mark inactive. If full removal is desired, need careful iterator handling.
+                        break; 
+                    }
+                }
+                std::cout << "[SERVER] Client " << username << " disconnected" << std::endl;
+
+
+            } else { // This is a backup server handling an incoming connection
+                packet pkt;
+                if (!clientNetwork->receivePacket(pkt)) {
+                    std::cerr << "[BACKUP] Failed to receive initial packet from leader. Connection likely closed immediately." << std::endl;
+                    clientNetwork->closeConnection();
+                    delete clientNetwork;
+                    return; // Graceful exit for ephemeral connection
+                }
+
+                if (pkt.type == PACKET_TYPE_CMD) {
+                    uint16_t cmd_val;
+                    memcpy(&cmd_val, pkt.payload, sizeof(cmd_val));
+
+                    if (cmd_val == CMD_HEARTBEAT) {
+                        std::lock_guard<std::mutex> lock(heartbeatMutex);
+                        lastHeartbeatTime = std::chrono::steady_clock::now();
+                        if (!leaderActive) {
+                            leaderActive = true;
+                            std::cout << "[BACKUP] Received first heartbeat. Leader is active." << std::endl;
+                        }
+                        std::cout << "[BACKUP] Received heartbeat. Leader is active." << std::endl;
+                        // std::cout << "[BACKUP] Heartbeat received." << std::endl; // Too chatty for frequent heartbeats
+                        // Leader closes connection immediately after sending heartbeat.
+                        // No further packets expected on this connection.
+                    } else if (cmd_val == CMD_REPLICATE) {
+                        std::cout << "[BACKUP] Received replication command." << std::endl;
+                        handleReplicationCommand(clientNetwork);
+                    } else if (cmd_val == CMD_DELETE) { // Handle replicated deletion
+                        std::string user;
+                        std::string fname;
+                        if (clientNetwork->receivePacket(pkt) && pkt.type == PACKET_TYPE_FILE) {
+                            user = std::string(pkt.payload, pkt.length);
+                            if (clientNetwork->receivePacket(pkt) && pkt.type == PACKET_TYPE_FILE) {
+                                fname = std::string(pkt.payload, pkt.length);
+                                std::string filepath = fileManager.getUserDir(user) + "/" + fname;
+                                bool success = false;
+                                try {
+                                    success = fs::remove(filepath);
+                                    std::cout << "[BACKUP][DELETE] Replicated deletion " << (success ? "succeeded" : "failed")
+                                              << " for: " << filepath << std::endl;
+                                } catch (const fs::filesystem_error& e) {
+                                    std::cerr << "[BACKUP][ERROR] Filesystem exception during replicated delete: " << e.what() << std::endl;
+                                }
+                            }
+                        }
+                    } else {
+                        std::cerr << "[BACKUP] Received unexpected command: " << cmd_val << std::endl;
+                    }
+                } else {
+                    std::cerr << "[BACKUP] Received unexpected packet type on initial connect: " << (int)pkt.type << std::endl;
+                }
+                
+                clientNetwork->closeConnection();
+                delete clientNetwork;
+                // std::cout << "[BACKUP] Incoming connection handled and closed." << std::endl; // Too chatty for heartbeats
+                return; // Thread done.
+
+            } // End of !isLeader branch
 
         } catch (const std::exception& e) {
-            std::cerr << "[SERVER] Error handling client " << username << ": " << e.what() << std::endl;
+            std::cerr << "[SERVER] Error handling client " << (username.empty() ? "unidentified/replication/heartbeat" : username) << ": " << e.what() << std::endl;
         }
 
-        // Cleanup
-        {
-            std::lock_guard<std::mutex> lock(connectionsMutex);
-            for (auto& conn : userConnections[username]) {
-                if (conn.network == clientNetwork) {
-                    conn.isActive = false;
-                    break;
-                }
-            }
-        }
-        std::cout << "[SERVER] Client " << username << " disconnected" << std::endl;
+        // The NetworkManager and socket are cleaned up inside the branches for both leader and backup paths.
     }
 
     void handleClientCommands(const std::string& username, NetworkManager* clientNetwork) {
@@ -235,35 +379,8 @@ private:
      size_t receivedChunks = 0;
      packet pkt;
 
-     if (!isLeader) {
-        // Backup servers handle replication packets
-        packet pkt;
-        while (clientNetwork->receivePacket(pkt)) {
-            if (pkt.type == PACKET_TYPE_FILE) {
-                // 1. Get username
-                std::string user(pkt.payload, pkt.length);
-                
-                // 2. Ensure user directory exists
-                fileManager.createUserDir(user);  // Critical fix!
-                
-                // 3. Get filename
-                if (!clientNetwork->receivePacket(pkt)) break;
-                std::string fname(pkt.payload, pkt.length);
-                
-                // 4. Get file content
-                if (!clientNetwork->receivePacket(pkt)) break;
-                std::string filepath = fileManager.getUserDir(user) + "/" + fname;
-                
-                // 5. Save file
-                std::ofstream file(filepath, std::ios::binary);
-                file.write(pkt.payload, pkt.length);
-                file.close();
-                
-                std::cout << "[BACKUP] Stored " << filepath << "\n";
-            }
-        }
-        return;
-    }
+    // This function now ONLY handles commands for leader's regular clients.
+    // Backup's incoming connections are handled directly in handleClient.
 
     while (true) {
         if (!clientNetwork->receivePacket(pkt)) {
@@ -276,13 +393,7 @@ private:
                 uint16_t cmd;
                 memcpy(&cmd, pkt.payload, sizeof(cmd));
 
-                if (cmd == CMD_REPLICATE) {
-                    if (!isLeader) {  // Only backups should process replication commands
-                        handleReplicationCommand(clientNetwork);
-                    }
-                    break;
-                }   
-                else if (cmd == CMD_UPLOAD) {
+                if (cmd == CMD_UPLOAD) {
                     std::unique_lock<std::mutex> uploadLock(uploadMutex);
                     if (inUpload) {
                         std::cerr << "[SERVER] Received new upload command while upload in progress" << std::endl;
@@ -362,6 +473,11 @@ private:
                         if (!clientNetwork->sendPacket(pkt)) {
                             std::cerr << "[SERVER][ERROR] Failed to send response" << std::endl;
                         }
+                        
+                        // If leader, replicate deletion to backups
+                        if (isLeader && success) {
+                            replicateDeletionToBackups(username, filename);
+                        }
                 } else if (cmd == CMD_DOWNLOAD) {
                         std::cout << "[SERVER] Received CMD_DOWNLOAD from " << username << std::endl;
                         std::unique_lock<std::mutex> opLock(uploadMutex); // Serialize with upload operations
@@ -416,6 +532,8 @@ private:
                         opLock.unlock(); // Release mutex
                 } else if (cmd == CMD_EXIT) {
                     return;
+                } else {
+                    std::cerr << "[SERVER] Unknown command received: " << cmd << std::endl;
                 }
                 break;
             }
@@ -505,9 +623,9 @@ private:
                     std::cout << "[SERVER] Upload completed for " << username << ": " << currentFilename << std::endl;
                     
                     std::string filepath = fileManager.getUserDir(username) + "/" + currentFilename;
-                    uploadLock.unlock();
+                    uploadLock.unlock(); // Release lock before broadcast, as broadcast might try to acquire its own locks
                     broadcastFileChange(username, currentFilename, filepath, clientNetwork->getSocket());
-                    uploadLock.lock();
+                    uploadLock.lock(); // Reacquire for safety if more processing here
                     
                     inUpload = false;
                     currentFilename.clear();
@@ -541,7 +659,8 @@ void replicateToBackups(const std::string& username, const std::string& filename
             file.close();
 
             // Send to each backup
-            for (const auto& [ip, port] : backupServers) {
+            auto backups = replicationManager.getBackupServers();
+            for (const auto& [ip, port] : backups) {
                 NetworkManager nm;
                 if (!nm.connectToServer(ip, port)) {
                     std::cerr << "[REPLICATION] Can't connect to backup " 
@@ -556,58 +675,119 @@ void replicateToBackups(const std::string& username, const std::string& filename
                 uint16_t cmd = CMD_REPLICATE;
                 pkt.length = sizeof(cmd);
                 memcpy(pkt.payload, &cmd, sizeof(cmd));
-                if (!nm.sendPacket(pkt)) continue;
+                if (!nm.sendPacket(pkt)) { nm.closeConnection(); continue; }
 
                 // Username
-                pkt.type = PACKET_TYPE_FILE;
+                pkt.type = PACKET_TYPE_FILE; // Reusing FILE type to indicate metadata like filename/username
                 pkt.length = username.size();
                 memcpy(pkt.payload, username.c_str(), pkt.length);
-                if (!nm.sendPacket(pkt)) continue;
+                if (!nm.sendPacket(pkt)) { nm.closeConnection(); continue; }
 
                 // Filename
                 pkt.length = filename.size();
                 memcpy(pkt.payload, filename.c_str(), pkt.length);
-                if (!nm.sendPacket(pkt)) continue;
+                if (!nm.sendPacket(pkt)) { nm.closeConnection(); continue; }
 
-                // File content
+                // File content (as a single packet for simplicity for replication)
+                // Note: For very large files, this would need to be chunked like normal file transfer.
                 pkt.type = PACKET_TYPE_DATA;
                 pkt.length = fileSize;
+                // Ensure payload buffer is large enough for fileSize
+                if (fileSize > MAX_PAYLOAD_SIZE) {
+                    std::cerr << "[REPLICATION] File too large for single packet replication. Skipping." << std::endl;
+                    nm.closeConnection();
+                    continue;
+                }
                 memcpy(pkt.payload, buffer.data(), fileSize);
-                nm.sendPacket(pkt);
+                if (!nm.sendPacket(pkt)) { nm.closeConnection(); continue; }
 
-                std::cout << "[REPLICATION] Sent to backup " << ip << ":" << port << std::endl;
+                std::cout << "[REPLICATION] Sent " << filename << " to backup " << ip << ":" << port << std::endl;
+                nm.closeConnection();
             }
         }).detach();
 }
 
-//handler for replication commands (for backup servers)
+void replicateDeletionToBackups(const std::string& username, const std::string& filename) {
+    std::thread([this, username, filename]() {
+        auto backups = replicationManager.getBackupServers();
+        for (const auto& [ip, port] : backups) {
+            NetworkManager nm;
+            if (!nm.connectToServer(ip, port)) {
+                std::cerr << "[REPLICATION][DELETE] Can't connect to backup "
+                          << ip << ":" << port << std::endl;
+                continue;
+            }
+
+            packet pkt;
+            // Command: DELETE for replication
+            pkt.type = PACKET_TYPE_CMD;
+            uint16_t cmd = CMD_DELETE; // Reuse CMD_DELETE, but it's sent as a replication
+            pkt.length = sizeof(cmd);
+            memcpy(pkt.payload, &cmd, sizeof(cmd));
+            if (!nm.sendPacket(pkt)) { nm.closeConnection(); continue; }
+
+            // Username
+            pkt.type = PACKET_TYPE_FILE; // Reusing FILE type for metadata
+            pkt.length = username.size();
+            memcpy(pkt.payload, username.c_str(), pkt.length);
+            if (!nm.sendPacket(pkt)) { nm.closeConnection(); continue; }
+
+            // Filename
+            pkt.length = filename.size();
+            memcpy(pkt.payload, filename.c_str(), pkt.length);
+            if (!nm.sendPacket(pkt)) { nm.closeConnection(); continue; }
+
+            std::cout << "[REPLICATION][DELETE] Sent deletion for " << filename
+                      << " to backup " << ip << ":" << port << std::endl;
+            nm.closeConnection();
+        }
+    }).detach();
+}
+
+
+// Handler for replication commands (for backup servers)
+// This function needs to be aware if it's handling a file, a deletion, or a heartbeat.
 void handleReplicationCommand(NetworkManager* clientNetwork) {
     packet pkt;
     
-    // 1. Receive username
-    if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_FILE) return;
+    // The first packet after CMD_REPLICATE should be the username
+    if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_FILE) {
+        std::cerr << "[BACKUP][REPLICATION] Expected username packet after CMD_REPLICATE." << std::endl;
+        return;
+    }
     std::string username(pkt.payload, pkt.length);
     
     // 2. Create user directory if needed
-    if (!fileManager.createUserDir(username)) {
-        std::cerr << "[BACKUP] Failed to create user directory\n";
+    // This fileManager refers to the Server's fileManager, as handleReplicationCommand is a member of Server.
+    if (!fileManager.createUserDir(username)) { 
+        std::cerr << "[BACKUP] Failed to create user directory for replication\n";
         return;
     }
 
-    // 3. Receive filename
-    if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_FILE) return;
+    // Now expect the filename
+    if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_FILE) {
+        std::cerr << "[BACKUP][REPLICATION] Expected filename packet after username." << std::endl;
+        return;
+    }
     std::string filename(pkt.payload, pkt.length);
-    
-    // 4. Receive file content
-    if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_DATA) return;
-    
-    // 5. Save to backup-specific folder
+
+    // After filename, it should be DATA for a file replication
+    if (!clientNetwork->receivePacket(pkt) || pkt.type != PACKET_TYPE_DATA) {
+        std::cerr << "[BACKUP][REPLICATION] Failed to receive file content." << std::endl;
+        return;
+    }
+
+    // This is a file replication
     std::string filepath = fileManager.getUserDir(username) + "/" + filename;
     std::ofstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "[BACKUP] Failed to create replicated file: " << filepath << "\n";
+        return;
+    }
     file.write(pkt.payload, pkt.length);
     file.close();
     
-    std::cout << "[BACKUP] Stored in " << filepath << "\n";
+    std::cout << "[BACKUP] Stored replicated file " << filepath << "\n";
 }
 
 
@@ -708,9 +888,7 @@ void broadcastFileChange(const std::string& sourceUsername, const std::string& f
         }
     }
     // If this is the leader, replicate to backups
-    std::cerr << "will test if is leader\n isLeader: " << isLeader << "\n!backupServers.empty():" << !backupServers.empty();
-    if (isLeader && !backupServers.empty()) {
-        std::cerr << "will replicate to backups";
+    if (isLeader) {
         replicateToBackups(sourceUsername, filename, filepath);
     }
 }};

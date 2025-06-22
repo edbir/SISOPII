@@ -23,6 +23,7 @@
 #define CMD_DELETE 4
 #define CMD_EXIT 5
 #define CMD_REPLICATE 7
+#define CMD_HEARTBEAT 8 
 
 // Maximum payload size
 #define MAX_PAYLOAD_SIZE 1024
