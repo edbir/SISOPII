@@ -95,6 +95,10 @@ void Frontend::handle_client(int client_socket) {
         }
         return;
     }
+    
+    // Disable timeouts for long-lived frontend-backend connections
+    backend_connection.disableTimeouts();
+    
     int backend_socket = backend_connection.getSocket();
 
     std::thread client_to_backend(&Frontend::forward_packets, this, client_socket, backend_socket, "CLIENT -> SERVER");

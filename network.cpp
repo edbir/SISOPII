@@ -95,6 +95,17 @@ bool NetworkManager::connectToServer(const std::string& ip, int port) {
     return true;
 }
 
+void NetworkManager::disableTimeouts() {
+    if (clientSocket != -1) {
+        // Remove timeout by setting it to 0 (no timeout)
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+        setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(clientSocket, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+}
+
 void NetworkManager::closeConnection() {
     if (clientSocket != -1) {
         close(clientSocket);

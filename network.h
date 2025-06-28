@@ -20,6 +20,7 @@ public:
 
     // Client functions
     bool connectToServer(const std::string& ip, int port);
+    void disableTimeouts();
     void closeConnection();
 
     // Common functions
