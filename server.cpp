@@ -264,6 +264,42 @@ private:
                 username = std::string(pkt.payload, pkt.length);
                 std::cout << "[SERVER] New client connected: " << username << std::endl;
 
+                // Check device limit - maximum 2 devices per user
+                {
+                    std::lock_guard<std::mutex> lock(connectionsMutex);
+                    auto& userConnectionsList = userConnections[username];
+                    
+                    // Count active connections for this user
+                    int activeConnections = 0;
+                    for (const auto& conn : userConnectionsList) {
+                        if (conn.isActive) {
+                            activeConnections++;
+                        }
+                    }
+                    
+                    if (activeConnections >= 2) {
+                        std::cout << "[SERVER] User " << username << " already has " << activeConnections 
+                                  << " active connections. Rejecting new connection." << std::endl;
+                        
+                        // Send rejection packet
+                        packet rejectPkt;
+                        rejectPkt.type = PACKET_TYPE_CMD;
+                        rejectPkt.length = sizeof(uint16_t);
+                        uint16_t rejectCmd = CMD_CONNECTION_REJECTED;
+                        memcpy(rejectPkt.payload, &rejectCmd, sizeof(rejectCmd));
+                        
+                        if (clientNetwork->sendPacket(rejectPkt)) {
+                            std::cout << "[SERVER] Sent connection rejection to " << username << std::endl;
+                        } else {
+                            std::cerr << "[SERVER] Failed to send rejection packet to " << username << std::endl;
+                        }
+                        
+                        clientNetwork->closeConnection();
+                        delete clientNetwork;
+                        return;
+                    }
+                }
+
                 pkt.type = PACKET_TYPE_ACK;
                 pkt.length = 0;
                 if (!clientNetwork->sendPacket(pkt)) {

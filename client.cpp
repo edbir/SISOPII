@@ -30,7 +30,21 @@ public:
 
         // Wait for server acknowledgment
         packet ack;
-        if (!network.receivePacket(ack) || ack.type != PACKET_TYPE_ACK) {
+        if (!network.receivePacket(ack)) {
+            throw std::runtime_error("Failed to receive server response");
+        }
+        
+        // Check if the server rejected the connection due to device limit
+        if (ack.type == PACKET_TYPE_CMD) {
+            uint16_t cmd;
+            memcpy(&cmd, ack.payload, sizeof(cmd));
+            if (cmd == CMD_CONNECTION_REJECTED) {
+                throw std::runtime_error("Connection rejected: You already have 2 devices connected. Please disconnect one device before connecting another.");
+            }
+        }
+        
+        // Check for normal acknowledgment
+        if (ack.type != PACKET_TYPE_ACK) {
             throw std::runtime_error("Failed to receive server acknowledgment");
         }
 
