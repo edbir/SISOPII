@@ -48,6 +48,15 @@ private:
     };
     std::queue<FileOperation> fileOpQueue;
     std::mutex queueMutex;
+    
+    // File hash tracking to prevent upload loops
+    std::map<std::string, std::string> fileHashes;  // filename -> hash
+    std::mutex hashMutex;
+    
+    // Hash calculation methods
+    std::string calculateFileHash(const std::string& filepath);
+    bool isFileHashChanged(const std::string& filename, const std::string& filepath);
+    void updateFileHash(const std::string& filename, const std::string& filepath);
 
     void syncLoop(const std::string& username);
     void handleFileChange(const std::string& username, const std::string& filepath, bool isDelete);

@@ -10,8 +10,65 @@
 #include <fstream>
 #include <vector>
 #include <thread>
+#include <sstream>
+#include <iomanip>
 
 namespace fs = std::filesystem;
+
+// Simple hash function for file content
+std::string SyncManager::calculateFileHash(const std::string& filepath) {
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        return "";
+    }
+    
+    // Read file content
+    file.seekg(0, std::ios::end);
+    size_t fileSize = file.tellg();
+    file.seekg(0, std::ios::beg);
+    
+    if (fileSize == 0) {
+        return "empty";
+    }
+    
+    std::vector<char> buffer(fileSize);
+    file.read(buffer.data(), fileSize);
+    file.close();
+    
+    // Simple hash: sum of all bytes + file size
+    uint64_t hash = fileSize;
+    for (size_t i = 0; i < fileSize; i++) {
+        hash += static_cast<uint8_t>(buffer[i]);
+        hash = (hash << 1) + (hash >> 63); // Simple rotation
+    }
+    
+    // Convert to hex string
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return ss.str();
+}
+
+bool SyncManager::isFileHashChanged(const std::string& filename, const std::string& filepath) {
+    std::lock_guard<std::mutex> lock(hashMutex);
+    
+    std::string currentHash = calculateFileHash(filepath);
+    if (currentHash.empty()) {
+        return false; // File doesn't exist or can't be read
+    }
+    
+    auto it = fileHashes.find(filename);
+    if (it == fileHashes.end()) {
+        // First time seeing this file
+        return true;
+    }
+    
+    return it->second != currentHash;
+}
+
+void SyncManager::updateFileHash(const std::string& filename, const std::string& filepath) {
+    std::lock_guard<std::mutex> lock(hashMutex);
+    fileHashes[filename] = calculateFileHash(filepath);
+}
 
 // Constructor initializes the sync manager with network and file manager references
 SyncManager::SyncManager(NetworkManager& net, FileManager& fileMgr)
@@ -148,6 +205,10 @@ bool SyncManager::uploadFile(const std::string& username, const std::string& fil
 
         isUploading = false;
         uploadCV.notify_one();
+        
+        // Update the file hash after successful upload
+        updateFileHash(filename, filepath);
+        
         std::cout << "[UPLOAD] Successfully uploaded: " << filename << std::endl;
         return true;
 
@@ -195,9 +256,16 @@ void SyncManager::handleFileChange(const std::string& username, const std::strin
     bool isInSyncDir = (filepath.find(syncDir) == 0);
 
     if (isInSyncDir) {
-        // This is a change in our sync directory - we need to upload it
-        std::cout << "[SYNC] Detected change in sync directory, uploading: " << filepath << std::endl;
-        uploadFile(username, filepath);
+        // Extract filename from filepath
+        std::string filename = fs::path(filepath).filename().string();
+        
+        // Check if the file hash has actually changed
+        if (isFileHashChanged(filename, filepath)) {
+            std::cout << "[SYNC] File hash changed, uploading: " << filepath << std::endl;
+            uploadFile(username, filepath);
+        } else {
+            std::cout << "[SYNC] File hash unchanged, skipping upload: " << filepath << std::endl;
+        }
     } else {
         // This is a change outside sync directory - ignore or handle differently
         std::cout << "[SYNC] Ignoring external file change: " << filepath << std::endl;
@@ -322,6 +390,8 @@ void SyncManager::syncLoop(const std::string& username) {
                             
                             if (bytesReceived == fileSize) {
                                 std::cout << "[SYNC] Successfully updated file: " << filename << std::endl;
+                                // Update the file hash to prevent re-uploading the same content
+                                updateFileHash(filename, filepath);
                             } else {
                                 std::cerr << "[SYNC] File transfer incomplete, removing: " << filename << std::endl;
                                 fs::remove(filepath);
